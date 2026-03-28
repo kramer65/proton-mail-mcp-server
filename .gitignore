@@ -1,0 +1,7 @@
+.DS_Store
+launchd.out.log
+launchd.err.log
+.env
+.env.*
+*.log
+.proton-bridge-credentials
