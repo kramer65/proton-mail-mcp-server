@@ -3,6 +3,8 @@
 This project exposes a Proton Mail account to Claude Cowork through MCP. It
 connects to Proton Mail Bridge over IMAP and SMTP, then serves a local MCP
 server over `stdio` so Claude Desktop and Cowork can launch it on demand.
+Within each MCP process, it reuses Bridge connections and idles them out
+automatically so repeated tool calls do not reconnect on every request.
 
 The checked-in `server.mjs` is the bundled working server that is currently
 being used locally. That keeps the repo self-contained and avoids requiring a
@@ -106,6 +108,8 @@ so this is mainly useful to catch obvious config or credential errors.
 - Uses IMAP via `imapflow` for listing, searching, reading, moving, flagging,
   and deleting mail
 - Uses SMTP via `nodemailer` for sending and replying
+- Reuses IMAP and SMTP connections inside each MCP process, with automatic idle
+  cleanup and reconnect-once behavior for stale Bridge connections
 - Uses `mailparser` when reading or replying so Claude gets structured message
   content
 
@@ -124,6 +128,9 @@ If email actions fail:
 - Confirm Bridge is listening on IMAP `1143` and SMTP `1025`, or update the
   port variables in `~/.proton-bridge-credentials`
 - Re-open Proton Mail Bridge if it was recently restarted
+- Optionally tune `PROTON_BRIDGE_IDLE_TIMEOUT_MS` and
+  `PROTON_BRIDGE_SMTP_IDLE_TIMEOUT_MS` if you want shorter or longer connection
+  reuse windows
 
 ## Security notes
 

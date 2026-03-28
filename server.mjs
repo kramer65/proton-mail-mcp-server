@@ -96825,7 +96825,24 @@ if (!CONFIG.username || !CONFIG.password) {
   );
   process.exit(1);
 }
-async function getImapClient() {
+var IMAP_IDLE_TIMEOUT_MS = parseInt(process.env.PROTON_BRIDGE_IDLE_TIMEOUT_MS || "300000", 10);
+var SMTP_IDLE_TIMEOUT_MS = parseInt(process.env.PROTON_BRIDGE_SMTP_IDLE_TIMEOUT_MS || "120000", 10);
+var imapClient = null;
+var imapClientPromise = null;
+var imapIdleTimer = null;
+var smtpTransport = null;
+var smtpIdleTimer = null;
+function clearIdleTimer(timer) {
+  if (timer) {
+    clearTimeout(timer);
+  }
+}
+function unrefTimer(timer) {
+  if (timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+}
+function createImapClient() {
   const client = new import_imapflow.ImapFlow({
     host: CONFIG.host,
     port: CONFIG.imapPort,
@@ -96840,8 +96857,116 @@ async function getImapClient() {
     },
     logger: false
   });
-  await client.connect();
+  client.on("close", () => {
+    if (imapClient === client) {
+      imapClient = null;
+      imapClientPromise = null;
+    }
+  });
   return client;
+}
+function isRetryableImapError(error) {
+  const message = `${error?.message || error || ""}`;
+  return /not connected|connection.*closed|socket.*closed|socket.*destroyed|timed out|ECONNRESET|EPIPE|User is authenticated but not connected/i.test(message);
+}
+function scheduleImapDisconnect() {
+  clearIdleTimer(imapIdleTimer);
+  imapIdleTimer = null;
+  if (!imapClient || !(IMAP_IDLE_TIMEOUT_MS > 0)) {
+    return;
+  }
+  const client = imapClient;
+  imapIdleTimer = setTimeout(async () => {
+    if (imapClient !== client) {
+      return;
+    }
+    imapClient = null;
+    imapClientPromise = null;
+    try {
+      if (client.usable) {
+        await client.logout();
+      } else {
+        client.close();
+      }
+    } catch {
+      try {
+        client.close();
+      } catch {
+      }
+    }
+  }, IMAP_IDLE_TIMEOUT_MS);
+  unrefTimer(imapIdleTimer);
+}
+function resetImapClient(client = imapClient) {
+  clearIdleTimer(imapIdleTimer);
+  imapIdleTimer = null;
+  if (client && imapClient === client) {
+    imapClient = null;
+  }
+  imapClientPromise = null;
+  if (!client) {
+    return;
+  }
+  try {
+    if (client.usable) {
+      client.logout().catch(() => client.close());
+    } else {
+      client.close();
+    }
+  } catch {
+  }
+}
+async function getImapClient() {
+  clearIdleTimer(imapIdleTimer);
+  imapIdleTimer = null;
+  if (imapClient?.usable) {
+    return imapClient;
+  }
+  if (!imapClientPromise) {
+    imapClientPromise = (async () => {
+      const client = createImapClient();
+      try {
+        await client.connect();
+        imapClient = client;
+        return client;
+      } catch (error) {
+        if (imapClient === client) {
+          imapClient = null;
+        }
+        throw error;
+      } finally {
+        imapClientPromise = null;
+      }
+    })();
+  }
+  return await imapClientPromise;
+}
+async function withImapClient(operation) {
+  const client = await getImapClient();
+  try {
+    const result = await operation(client);
+    scheduleImapDisconnect();
+    return result;
+  } catch (error) {
+    if (client.usable && !isRetryableImapError(error)) {
+      scheduleImapDisconnect();
+      throw error;
+    }
+    resetImapClient(client);
+    const retryClient = await getImapClient();
+    try {
+      const result = await operation(retryClient);
+      scheduleImapDisconnect();
+      return result;
+    } catch (retryError) {
+      if (!retryClient.usable || isRetryableImapError(retryError)) {
+        resetImapClient(retryClient);
+      } else {
+        scheduleImapDisconnect();
+      }
+      throw retryError;
+    }
+  }
 }
 function formatAddress(addr) {
   if (!addr) return "";
@@ -96852,11 +96977,14 @@ function formatAddress(addr) {
   }
   return addr.address || "";
 }
-function getSmtpTransport() {
+function createSmtpTransport() {
   return import_nodemailer.default.createTransport({
     host: CONFIG.host,
     port: CONFIG.smtpPort,
     secure: true,
+    pool: true,
+    maxConnections: 1,
+    maxMessages: 100,
     // Proton Bridge SMTP uses implicit SSL
     auth: {
       user: CONFIG.username,
@@ -96868,6 +96996,118 @@ function getSmtpTransport() {
     }
   });
 }
+function isRetryableSmtpError(error) {
+  const message = `${error?.message || error || ""}`;
+  return /connection.*closed|socket.*closed|timed out|ECONNRESET|EPIPE|greeting never received/i.test(message);
+}
+function scheduleSmtpClose() {
+  clearIdleTimer(smtpIdleTimer);
+  smtpIdleTimer = null;
+  if (!smtpTransport || !(SMTP_IDLE_TIMEOUT_MS > 0)) {
+    return;
+  }
+  const transport2 = smtpTransport;
+  smtpIdleTimer = setTimeout(() => {
+    if (smtpTransport !== transport2) {
+      return;
+    }
+    smtpTransport = null;
+    try {
+      transport2.close();
+    } catch {
+    }
+  }, SMTP_IDLE_TIMEOUT_MS);
+  unrefTimer(smtpIdleTimer);
+}
+function resetSmtpTransport() {
+  clearIdleTimer(smtpIdleTimer);
+  smtpIdleTimer = null;
+  if (!smtpTransport) {
+    return;
+  }
+  const transport2 = smtpTransport;
+  smtpTransport = null;
+  try {
+    transport2.close();
+  } catch {
+  }
+}
+function getSmtpTransport() {
+  clearIdleTimer(smtpIdleTimer);
+  smtpIdleTimer = null;
+  if (!smtpTransport) {
+    smtpTransport = createSmtpTransport();
+  }
+  return smtpTransport;
+}
+async function sendMail(mailOptions) {
+  const transport2 = getSmtpTransport();
+  try {
+    const info = await transport2.sendMail(mailOptions);
+    scheduleSmtpClose();
+    return info;
+  } catch (error) {
+    if (!isRetryableSmtpError(error)) {
+      scheduleSmtpClose();
+      throw error;
+    }
+    resetSmtpTransport();
+    const retryTransport = getSmtpTransport();
+    try {
+      const info = await retryTransport.sendMail(mailOptions);
+      scheduleSmtpClose();
+      return info;
+    } catch (retryError) {
+      if (isRetryableSmtpError(retryError)) {
+        resetSmtpTransport();
+      } else {
+        scheduleSmtpClose();
+      }
+      throw retryError;
+    }
+  }
+}
+async function shutdownResources() {
+  clearIdleTimer(imapIdleTimer);
+  clearIdleTimer(smtpIdleTimer);
+  imapIdleTimer = null;
+  smtpIdleTimer = null;
+  const client = imapClient;
+  imapClient = null;
+  imapClientPromise = null;
+  if (client) {
+    try {
+      if (client.usable) {
+        await client.logout();
+      } else {
+        client.close();
+      }
+    } catch {
+      try {
+        client.close();
+      } catch {
+      }
+    }
+  }
+  resetSmtpTransport();
+}
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    shutdownResources().finally(() => process.exit(0));
+  });
+}
+process.once("exit", () => {
+  clearIdleTimer(imapIdleTimer);
+  clearIdleTimer(smtpIdleTimer);
+  try {
+    imapClient?.close();
+  } catch {
+  }
+  try {
+    smtpTransport?.close();
+  } catch {
+  }
+});
 var server = new McpServer({
   name: "proton-mail",
   version: "0.1.0"
@@ -96876,9 +97116,7 @@ server.tool(
   "list_folders",
   "List all mailbox folders (INBOX, Sent, Drafts, Trash, etc.)",
   {},
-  async () => {
-    const client = await getImapClient();
-    try {
+  async () => withImapClient(async (client) => {
       let walk = function(items, prefix = "") {
         for (const item of items) {
           folders.push({
@@ -96902,10 +97140,7 @@ server.tool(
           }
         ]
       };
-    } finally {
-      await client.logout();
-    }
-  }
+    })
 );
 server.tool(
   "list_emails",
@@ -96914,9 +97149,7 @@ server.tool(
     folder: external_exports3.string().default("INBOX").describe("Folder path (e.g. INBOX, Sent, Drafts)"),
     limit: external_exports3.number().default(20).describe("Maximum number of emails to return (default 20, max 50)")
   },
-  async ({ folder, limit }) => {
-    const client = await getImapClient();
-    try {
+  async ({ folder, limit }) => withImapClient(async (client) => {
       const effectiveLimit = Math.min(limit || 20, 50);
       const lock = await client.getMailboxLock(folder);
       try {
@@ -96959,10 +97192,7 @@ server.tool(
       } finally {
         lock.release();
       }
-    } finally {
-      await client.logout();
-    }
-  }
+    })
 );
 server.tool(
   "read_email",
@@ -96971,9 +97201,7 @@ server.tool(
     uid: external_exports3.number().describe("The UID of the email to read"),
     folder: external_exports3.string().default("INBOX").describe("Folder the email is in (default: INBOX)")
   },
-  async ({ uid, folder }) => {
-    const client = await getImapClient();
-    try {
+  async ({ uid, folder }) => withImapClient(async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
         const rawMessage = await client.fetchOne(`${uid}`, {
@@ -97003,10 +97231,7 @@ server.tool(
       } finally {
         lock.release();
       }
-    } finally {
-      await client.logout();
-    }
-  }
+    })
 );
 server.tool(
   "search_emails",
@@ -97021,9 +97246,7 @@ server.tool(
     unseen: external_exports3.boolean().optional().describe("Only return unread emails (default: false)"),
     limit: external_exports3.number().default(20).describe("Max results (default 20, max 50)")
   },
-  async ({ folder, from, subject, body, since, before, unseen, limit }) => {
-    const client = await getImapClient();
-    try {
+  async ({ folder, from, subject, body, since, before, unseen, limit }) => withImapClient(async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
         const searchCriteria = {};
@@ -97074,10 +97297,7 @@ server.tool(
       } finally {
         lock.release();
       }
-    } finally {
-      await client.logout();
-    }
-  }
+    })
 );
 server.tool(
   "send_email",
@@ -97091,38 +97311,33 @@ server.tool(
     bcc: external_exports3.string().optional().describe("BCC recipients, comma-separated")
   },
   async ({ to, subject, body, html, cc, bcc }) => {
-    const transport2 = getSmtpTransport();
-    try {
-      const mailOptions = {
-        from: CONFIG.username,
-        to,
-        subject,
-        text: body
-      };
-      if (html) mailOptions.html = html;
-      if (cc) mailOptions.cc = cc;
-      if (bcc) mailOptions.bcc = bcc;
-      const info = await transport2.sendMail(mailOptions);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                messageId: info.messageId,
-                to,
-                subject
-              },
-              null,
-              2
-            )
-          }
-        ]
-      };
-    } finally {
-      transport2.close();
-    }
+    const mailOptions = {
+      from: CONFIG.username,
+      to,
+      subject,
+      text: body
+    };
+    if (html) mailOptions.html = html;
+    if (cc) mailOptions.cc = cc;
+    if (bcc) mailOptions.bcc = bcc;
+    const info = await sendMail(mailOptions);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              success: true,
+              messageId: info.messageId,
+              to,
+              subject
+            },
+            null,
+            2
+          )
+        }
+      ]
+    };
   }
 );
 server.tool(
@@ -97136,72 +97351,63 @@ server.tool(
     replyAll: external_exports3.boolean().default(false).describe("Reply to all recipients (default: false)")
   },
   async ({ uid, folder, body, html, replyAll }) => {
-    const client = await getImapClient();
-    let original;
-    try {
+    const original = await withImapClient(async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
         const rawMessage = await client.fetchOne(`${uid}`, {
           source: true,
           uid: true
         }, { uid: true });
-        original = await (0, import_mailparser.simpleParser)(rawMessage.source);
+        return await (0, import_mailparser.simpleParser)(rawMessage.source);
       } finally {
         lock.release();
       }
-    } finally {
-      await client.logout();
-    }
-    const transport2 = getSmtpTransport();
-    try {
-      const replyTo = formatAddress(original.from);
-      let recipients = replyTo;
-      if (replyAll) {
-        const allTo = [
-          formatAddress(original.to),
-          formatAddress(original.cc)
-        ].filter(Boolean).join(", ");
-        const allAddresses = allTo.split(",").map((a) => a.trim()).filter((a) => !a.includes(CONFIG.username));
-        if (allAddresses.length > 0) {
-          recipients = [replyTo, ...allAddresses].join(", ");
-        }
+    });
+    const replyTo = formatAddress(original.from);
+    let recipients = replyTo;
+    if (replyAll) {
+      const allTo = [
+        formatAddress(original.to),
+        formatAddress(original.cc)
+      ].filter(Boolean).join(", ");
+      const allAddresses = allTo.split(",").map((a) => a.trim()).filter((a) => !a.includes(CONFIG.username));
+      if (allAddresses.length > 0) {
+        recipients = [replyTo, ...allAddresses].join(", ");
       }
-      const subjectLine = original.subject?.startsWith("Re:") ? original.subject : `Re: ${original.subject || ""}`;
-      const references = [
-        original.references,
-        original.messageId
-      ].flat().filter(Boolean).join(" ");
-      const mailOptions = {
-        from: CONFIG.username,
-        to: recipients,
-        subject: subjectLine,
-        text: body,
-        inReplyTo: original.messageId,
-        references: references || void 0
-      };
-      if (html) mailOptions.html = html;
-      const info = await transport2.sendMail(mailOptions);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                messageId: info.messageId,
-                to: recipients,
-                subject: subjectLine,
-                inReplyTo: original.messageId
-              },
-              null,
-              2
-            )
-          }
-        ]
-      };
-    } finally {
-      transport2.close();
     }
+    const subjectLine = original.subject?.startsWith("Re:") ? original.subject : `Re: ${original.subject || ""}`;
+    const references = [
+      original.references,
+      original.messageId
+    ].flat().filter(Boolean).join(" ");
+    const mailOptions = {
+      from: CONFIG.username,
+      to: recipients,
+      subject: subjectLine,
+      text: body,
+      inReplyTo: original.messageId,
+      references: references || void 0
+    };
+    if (html) mailOptions.html = html;
+    const info = await sendMail(mailOptions);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              success: true,
+              messageId: info.messageId,
+              to: recipients,
+              subject: subjectLine,
+              inReplyTo: original.messageId
+            },
+            null,
+            2
+          )
+        }
+      ]
+    };
   }
 );
 server.tool(
@@ -97212,9 +97418,7 @@ server.tool(
     sourceFolder: external_exports3.string().default("INBOX").describe("Current folder of the email"),
     destinationFolder: external_exports3.string().describe("Target folder (e.g. Trash, Archive, Folders/MyLabel)")
   },
-  async ({ uid, sourceFolder, destinationFolder }) => {
-    const client = await getImapClient();
-    try {
+  async ({ uid, sourceFolder, destinationFolder }) => withImapClient(async (client) => {
       const lock = await client.getMailboxLock(sourceFolder);
       try {
         await client.messageMove(`${uid}`, destinationFolder, { uid: true });
@@ -97238,10 +97442,7 @@ server.tool(
       } finally {
         lock.release();
       }
-    } finally {
-      await client.logout();
-    }
-  }
+    })
 );
 server.tool(
   "mark_email",
@@ -97251,9 +97452,7 @@ server.tool(
     folder: external_exports3.string().default("INBOX").describe("Folder the email is in"),
     action: external_exports3.enum(["read", "unread", "flag", "unflag"]).describe("Action to perform")
   },
-  async ({ uid, folder, action }) => {
-    const client = await getImapClient();
-    try {
+  async ({ uid, folder, action }) => withImapClient(async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
         const flagMap = {
@@ -97280,10 +97479,7 @@ server.tool(
       } finally {
         lock.release();
       }
-    } finally {
-      await client.logout();
-    }
-  }
+    })
 );
 server.tool(
   "delete_email",
@@ -97292,9 +97488,7 @@ server.tool(
     uid: external_exports3.number().describe("UID of the email to delete"),
     folder: external_exports3.string().default("INBOX").describe("Folder the email is in")
   },
-  async ({ uid, folder }) => {
-    const client = await getImapClient();
-    try {
+  async ({ uid, folder }) => withImapClient(async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
         await client.messageDelete(`${uid}`, { uid: true });
@@ -97313,10 +97507,7 @@ server.tool(
       } finally {
         lock.release();
       }
-    } finally {
-      await client.logout();
-    }
-  }
+    })
 );
 var transport = new StdioServerTransport();
 await server.connect(transport);
