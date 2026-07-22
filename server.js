@@ -378,9 +378,16 @@ async function shutdownResources() {
   clearIdleTimer(smtpIdleTimer);
   imapIdleTimer = null;
   smtpIdleTimer = null;
-  const client = imapClient;
+  const pendingClientPromise = imapClientPromise;
+  let client = imapClient;
   imapClient = null;
   imapClientPromise = null;
+  if (!client && pendingClientPromise) {
+    try {
+      client = await pendingClientPromise;
+    } catch {
+    }
+  }
   if (client) {
     try {
       if (client.usable) {
@@ -397,11 +404,47 @@ async function shutdownResources() {
   }
   resetSmtpTransport();
 }
+var shutdownStarted = false;
+async function shutdown(exitCode) {
+  if (shutdownStarted) {
+    return;
+  }
+  shutdownStarted = true;
+  // Ensure we exit even if a close call hangs on a dead connection
+  const forceExitTimer = setTimeout(() => process.exit(exitCode), 1500);
+  unrefTimer(forceExitTimer);
+  try {
+    await shutdownResources();
+    try {
+      if (typeof server?.close === "function") {
+        await server.close();
+      }
+    } catch {
+    }
+  } finally {
+    clearIdleTimer(forceExitTimer);
+  }
+  process.exit(exitCode);
+}
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
-    shutdownResources().finally(() => process.exit(0));
+    void shutdown(0);
   });
 }
+process.stdin.once("end", () => {
+  void shutdown(0);
+});
+process.stdin.once("close", () => {
+  void shutdown(0);
+});
+process.once("uncaughtException", (error) => {
+  console.error(error);
+  void shutdown(1);
+});
+process.once("unhandledRejection", (error) => {
+  console.error(error);
+  void shutdown(1);
+});
 process.once("exit", () => {
   clearIdleTimer(imapIdleTimer);
   clearIdleTimer(smtpIdleTimer);
@@ -877,3 +920,6 @@ server.tool(
 );
 var transport = new StdioServerTransport();
 await server.connect(transport);
+server.server.onclose = () => {
+  void shutdown(0);
+};
