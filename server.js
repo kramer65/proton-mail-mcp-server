@@ -713,23 +713,38 @@ server.tool(
       }
     })
 );
+async function findTrashPath(client) {
+  const tree = await client.listTree();
+  const stack = [...tree.folders || []];
+  while (stack.length > 0) {
+    const item = stack.pop();
+    if (item.specialUse === "\\Trash") {
+      return item.path;
+    }
+    if (item.folders) {
+      stack.push(...item.folders);
+    }
+  }
+  return "Trash";
+}
 server.tool(
   "delete_email",
-  "Permanently delete an email (moves to Trash, then expunges). Use with caution.",
+  "Delete an email by moving it to the Trash folder.",
   {
     uid: z.number().describe("UID of the email to delete"),
     folder: z.string().default("INBOX").describe("Folder the email is in")
   },
   async ({ uid, folder }) => withImapClient(async (client) => {
+      const trashPath = await findTrashPath(client);
       const lock = await client.getMailboxLock(folder);
       try {
-        await client.messageDelete(`${uid}`, { uid: true });
+        await client.messageMove(`${uid}`, trashPath, { uid: true });
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify(
-                { success: true, uid, deleted: true },
+                { success: true, uid, movedTo: trashPath },
                 null,
                 2
               )
