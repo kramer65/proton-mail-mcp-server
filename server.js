@@ -208,6 +208,11 @@ function formatAddress(addr) {
   }
   return addr.address || "";
 }
+function formatRecipient(addr) {
+  if (!addr.name) return addr.address;
+  const quotedName = `"${addr.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return `${quotedName} <${addr.address}>`;
+}
 function createSmtpTransport() {
   return nodemailer.createTransport({
     host: CONFIG.host,
@@ -595,16 +600,23 @@ server.tool(
         lock.release();
       }
     });
-    const replyTo = formatAddress(original.from);
+    const fromAddresses = original.from?.value || [];
+    const replyTo = fromAddresses.length > 0 ? fromAddresses.map(formatRecipient).join(", ") : formatAddress(original.from);
     let recipients = replyTo;
     if (replyAll) {
-      const allTo = [
-        formatAddress(original.to),
-        formatAddress(original.cc)
-      ].filter(Boolean).join(", ");
-      const allAddresses = allTo.split(",").map((a) => a.trim()).filter((a) => !a.includes(CONFIG.username));
+      const seen = new Set(fromAddresses.map((a) => (a.address || "").toLowerCase()));
+      seen.add((CONFIG.username || "").toLowerCase());
+      const allAddresses = [
+        ...original.to?.value || [],
+        ...original.cc?.value || []
+      ].filter((a) => {
+        const bare = (a.address || "").toLowerCase();
+        if (!bare || seen.has(bare)) return false;
+        seen.add(bare);
+        return true;
+      });
       if (allAddresses.length > 0) {
-        recipients = [replyTo, ...allAddresses].join(", ");
+        recipients = [replyTo, ...allAddresses.map(formatRecipient)].join(", ");
       }
     }
     const subjectLine = original.subject?.startsWith("Re:") ? original.subject : `Re: ${original.subject || ""}`;
