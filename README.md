@@ -1,14 +1,26 @@
-# Proton Mail MCP Server for Claude Cowork
+# Proton Mail MCP Server
 
-This project exposes a Proton Mail account to Claude Cowork through MCP. It
-connects to Proton Mail Bridge over IMAP and SMTP, then serves a local MCP
-server over `stdio` so Claude Desktop and Cowork can launch it on demand.
-Within each MCP process, it reuses Bridge connections and idles them out
-automatically so repeated tool calls do not reconnect on every request.
+An MCP server that exposes a Proton Mail account to MCP clients such as
+Claude Desktop and Claude Code. It connects to a locally running
+[Proton Mail Bridge](https://proton.me/mail/bridge) over IMAP and SMTP and
+serves the MCP protocol over `stdio`. Within each server process it reuses
+Bridge connections and idles them out automatically, so repeated tool calls
+do not reconnect on every request.
 
-The checked-in `server.mjs` is the bundled working server that is currently
-being used locally. That keeps the repo self-contained and avoids requiring a
-separate build step before connecting it to Claude.
+## About this fork
+
+This is a fork of
+[tamlut-modnys/proton-mail-mcp-server](https://github.com/tamlut-modnys/proton-mail-mcp-server)
+(as of upstream commit `a849adf`). Upstream ships only `server.mjs`, an
+esbuild bundle of ~97,500 lines with all dependencies vendored in and no
+separate source. This fork reconstructs readable source: the application code
+was extracted verbatim from the tail of the upstream bundle into `server.js`,
+the bundler shims were translated back to regular ESM imports, and the
+dependencies are installed from npm with exact-pinned versions instead of
+being vendored.
+
+Upstream does not declare a license; attribution for the original code lies
+with the original author (tamlut-modnys).
 
 ## Features
 
@@ -20,17 +32,21 @@ separate build step before connecting it to Claude.
 - Reply to emails with proper threading headers
 - Move messages between folders
 - Mark messages read, unread, flagged, or unflagged
-- Delete emails
-
-## Files
-
-- `server.mjs`: the bundled MCP server used by Claude
+- Delete emails (move to Trash)
 
 ## Prerequisites
 
 - Node.js 18+
 - Proton Mail Bridge installed and logged in
-- Claude Desktop / Claude Cowork with local MCP enabled
+- An MCP client (e.g. Claude Desktop or Claude Code)
+
+## Installation
+
+```bash
+git clone <this repo>
+cd proton-mail-mcp-server
+npm ci
+```
 
 ## Configure Proton Bridge credentials
 
@@ -49,34 +65,29 @@ PROTON_BRIDGE_SMTP_PORT="1025"
 ```
 
 Only the username and password are required if you use Bridge's default local
-ports.
+ports. The password is the Bridge password shown in the Proton Mail Bridge
+app, not your Proton account password.
 
-## Connect it to Claude Cowork
+## Connect it to an MCP client
 
-Add this entry to:
-
-`~/Library/Application Support/Claude/claude_desktop_config.json`
+For Claude Desktop, add this entry to `claude_desktop_config.json`
+(macOS: `~/Library/Application Support/Claude/`, Linux: `~/.config/Claude/`):
 
 ```json
 {
   "mcpServers": {
     "proton-mail": {
-      "command": "/opt/homebrew/bin/node",
+      "command": "node",
       "args": [
-        "/ABSOLUTE/PATH/TO/server.mjs"
+        "/ABSOLUTE/PATH/TO/server.js"
       ]
     }
   }
 }
 ```
 
-If your Node binary is somewhere else, use the output of:
-
-```bash
-which node
-```
-
-Then fully restart Claude Desktop. Claude Cowork should discover the Proton
+If `node` is not on the client's PATH, use the absolute path from
+`which node`. Then fully restart the client; it should discover the Proton
 Mail tools on launch.
 
 ## Available tools
@@ -96,11 +107,12 @@ Mail tools on launch.
 You can sanity check that the server starts:
 
 ```bash
-node server.mjs
+node server.js
 ```
 
-It will wait for MCP messages on standard input. Claude is the normal client,
-so this is mainly useful to catch obvious config or credential errors.
+It will wait for MCP messages on standard input. An MCP client is the normal
+consumer, so this is mainly useful to catch obvious config or credential
+errors.
 
 ## How it works
 
@@ -110,15 +122,15 @@ so this is mainly useful to catch obvious config or credential errors.
 - Uses SMTP via `nodemailer` for sending and replying
 - Reuses IMAP and SMTP connections inside each MCP process, with automatic idle
   cleanup and reconnect-once behavior for stale Bridge connections
-- Uses `mailparser` when reading or replying so Claude gets structured message
-  content
+- Uses `mailparser` when reading or replying so the client gets structured
+  message content
 
 ## Troubleshooting
 
-If Claude does not show the tools:
+If your MCP client does not show the tools:
 
-- Verify the `command` and `args` paths in `claude_desktop_config.json`
-- Restart Claude Desktop completely
+- Verify the `command` and `args` paths in the client's MCP configuration
+- Restart the client completely
 - Make sure Proton Mail Bridge is running
 - Make sure your Bridge credentials file exists and contains the Bridge password,
   not your main Proton account password
