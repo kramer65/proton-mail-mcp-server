@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { simpleParser } from "mailparser";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -31,6 +32,7 @@ function loadConfig() {
         if (key === "PROTON_BRIDGE_IMAP_PORT") process.env.PROTON_BRIDGE_IMAP_PORT = val;
         if (key === "PROTON_BRIDGE_SMTP_PORT") process.env.PROTON_BRIDGE_SMTP_PORT = val;
         if (key === "PROTON_BRIDGE_SMTP_SECURE") process.env.PROTON_BRIDGE_SMTP_SECURE = val;
+        if (key === "PROTON_BRIDGE_ALLOW_SEND") process.env.PROTON_BRIDGE_ALLOW_SEND = val;
       }
     } catch {
     }
@@ -52,6 +54,7 @@ if (!CONFIG.username || !CONFIG.password) {
   );
   process.exit(1);
 }
+var ALLOW_SEND = /^(1|true|yes)$/i.test(process.env.PROTON_BRIDGE_ALLOW_SEND || "");
 var IMAP_IDLE_TIMEOUT_MS = parseInt(process.env.PROTON_BRIDGE_IDLE_TIMEOUT_MS || "300000", 10);
 var SMTP_IDLE_TIMEOUT_MS = parseInt(process.env.PROTON_BRIDGE_SMTP_IDLE_TIMEOUT_MS || "120000", 10);
 var imapClient = null;
@@ -212,6 +215,72 @@ function formatRecipient(addr) {
   if (!addr.name) return addr.address;
   const quotedName = `"${addr.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   return `${quotedName} <${addr.address}>`;
+}
+function buildRawMessage(mailOptions) {
+  return new Promise((resolve, reject) => {
+    new MailComposer(mailOptions).compile().build((err, message) => {
+      if (err) reject(err);
+      else resolve(message);
+    });
+  });
+}
+async function fetchParsedMessage(uid, folder) {
+  return await withImapClient(async (client) => {
+    const lock = await client.getMailboxLock(folder);
+    try {
+      const rawMessage = await client.fetchOne(`${uid}`, {
+        source: true,
+        uid: true
+      }, { uid: true });
+      return await simpleParser(rawMessage.source);
+    } finally {
+      lock.release();
+    }
+  });
+}
+function buildReplyMailOptions(original, body, html, replyAll) {
+  const fromAddresses = original.from?.value || [];
+  const replyTo = fromAddresses.length > 0 ? fromAddresses.map(formatRecipient).join(", ") : formatAddress(original.from);
+  let recipients = replyTo;
+  if (replyAll) {
+    const seen = new Set(fromAddresses.map((a) => (a.address || "").toLowerCase()));
+    seen.add((CONFIG.username || "").toLowerCase());
+    const allAddresses = [
+      ...original.to?.value || [],
+      ...original.cc?.value || []
+    ].filter((a) => {
+      const bare = (a.address || "").toLowerCase();
+      if (!bare || seen.has(bare)) return false;
+      seen.add(bare);
+      return true;
+    });
+    if (allAddresses.length > 0) {
+      recipients = [replyTo, ...allAddresses.map(formatRecipient)].join(", ");
+    }
+  }
+  const subjectLine = original.subject?.startsWith("Re:") ? original.subject : `Re: ${original.subject || ""}`;
+  const references = [
+    original.references,
+    original.messageId
+  ].flat().filter(Boolean).join(" ");
+  const mailOptions = {
+    from: CONFIG.username,
+    to: recipients,
+    subject: subjectLine,
+    text: body,
+    inReplyTo: original.messageId,
+    references: references || void 0
+  };
+  if (html) mailOptions.html = html;
+  return mailOptions;
+}
+async function saveDraft(mailOptions) {
+  const raw = await buildRawMessage(mailOptions);
+  return await withImapClient(async (client) => {
+    const draftsPath = await findSpecialUsePath(client, "\\Drafts", "Drafts");
+    const appended = await client.append(draftsPath, raw, ["\\Draft", "\\Seen"]);
+    return { folder: draftsPath, uid: appended?.uid ?? null };
+  });
 }
 function createSmtpTransport() {
   return nodemailer.createTransport({
@@ -537,8 +606,8 @@ server.tool(
     })
 );
 server.tool(
-  "send_email",
-  "Compose and send a new email. Supports plain text and HTML body, CC, BCC.",
+  "create_draft",
+  "Create a draft email in the Drafts folder. Nothing is sent; the user reviews and sends it from their own mail client.",
   {
     to: z.string().describe("Recipient email address(es), comma-separated"),
     subject: z.string().describe("Email subject line"),
@@ -557,7 +626,7 @@ server.tool(
     if (html) mailOptions.html = html;
     if (cc) mailOptions.cc = cc;
     if (bcc) mailOptions.bcc = bcc;
-    const info = await sendMail(mailOptions);
+    const draft = await saveDraft(mailOptions);
     return {
       content: [
         {
@@ -565,7 +634,9 @@ server.tool(
           text: JSON.stringify(
             {
               success: true,
-              messageId: info.messageId,
+              draft: true,
+              savedTo: draft.folder,
+              uid: draft.uid,
               to,
               subject
             },
@@ -578,8 +649,8 @@ server.tool(
   }
 );
 server.tool(
-  "reply_to_email",
-  "Reply to an existing email. Reads the original to set proper headers (In-Reply-To, References).",
+  "create_reply_draft",
+  "Create a reply to an existing email as a draft in the Drafts folder, with proper threading headers (In-Reply-To, References). Nothing is sent; the user reviews and sends it from their own mail client.",
   {
     uid: z.number().describe("UID of the email to reply to"),
     folder: z.string().default("INBOX").describe("Folder the original email is in"),
@@ -588,52 +659,9 @@ server.tool(
     replyAll: z.boolean().default(false).describe("Reply to all recipients (default: false)")
   },
   async ({ uid, folder, body, html, replyAll }) => {
-    const original = await withImapClient(async (client) => {
-      const lock = await client.getMailboxLock(folder);
-      try {
-        const rawMessage = await client.fetchOne(`${uid}`, {
-          source: true,
-          uid: true
-        }, { uid: true });
-        return await simpleParser(rawMessage.source);
-      } finally {
-        lock.release();
-      }
-    });
-    const fromAddresses = original.from?.value || [];
-    const replyTo = fromAddresses.length > 0 ? fromAddresses.map(formatRecipient).join(", ") : formatAddress(original.from);
-    let recipients = replyTo;
-    if (replyAll) {
-      const seen = new Set(fromAddresses.map((a) => (a.address || "").toLowerCase()));
-      seen.add((CONFIG.username || "").toLowerCase());
-      const allAddresses = [
-        ...original.to?.value || [],
-        ...original.cc?.value || []
-      ].filter((a) => {
-        const bare = (a.address || "").toLowerCase();
-        if (!bare || seen.has(bare)) return false;
-        seen.add(bare);
-        return true;
-      });
-      if (allAddresses.length > 0) {
-        recipients = [replyTo, ...allAddresses.map(formatRecipient)].join(", ");
-      }
-    }
-    const subjectLine = original.subject?.startsWith("Re:") ? original.subject : `Re: ${original.subject || ""}`;
-    const references = [
-      original.references,
-      original.messageId
-    ].flat().filter(Boolean).join(" ");
-    const mailOptions = {
-      from: CONFIG.username,
-      to: recipients,
-      subject: subjectLine,
-      text: body,
-      inReplyTo: original.messageId,
-      references: references || void 0
-    };
-    if (html) mailOptions.html = html;
-    const info = await sendMail(mailOptions);
+    const original = await fetchParsedMessage(uid, folder);
+    const mailOptions = buildReplyMailOptions(original, body, html, replyAll);
+    const draft = await saveDraft(mailOptions);
     return {
       content: [
         {
@@ -641,9 +669,11 @@ server.tool(
           text: JSON.stringify(
             {
               success: true,
-              messageId: info.messageId,
-              to: recipients,
-              subject: subjectLine,
+              draft: true,
+              savedTo: draft.folder,
+              uid: draft.uid,
+              to: mailOptions.to,
+              subject: mailOptions.subject,
               inReplyTo: original.messageId
             },
             null,
@@ -654,6 +684,83 @@ server.tool(
     };
   }
 );
+if (ALLOW_SEND) {
+  server.tool(
+    "send_email",
+    "Compose and send a new email. Supports plain text and HTML body, CC, BCC.",
+    {
+      to: z.string().describe("Recipient email address(es), comma-separated"),
+      subject: z.string().describe("Email subject line"),
+      body: z.string().describe("Email body (plain text)"),
+      html: z.string().optional().describe("Optional HTML version of the body"),
+      cc: z.string().optional().describe("CC recipients, comma-separated"),
+      bcc: z.string().optional().describe("BCC recipients, comma-separated")
+    },
+    async ({ to, subject, body, html, cc, bcc }) => {
+      const mailOptions = {
+        from: CONFIG.username,
+        to,
+        subject,
+        text: body
+      };
+      if (html) mailOptions.html = html;
+      if (cc) mailOptions.cc = cc;
+      if (bcc) mailOptions.bcc = bcc;
+      const info = await sendMail(mailOptions);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                messageId: info.messageId,
+                to,
+                subject
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+  );
+  server.tool(
+    "reply_to_email",
+    "Reply to an existing email. Reads the original to set proper headers (In-Reply-To, References).",
+    {
+      uid: z.number().describe("UID of the email to reply to"),
+      folder: z.string().default("INBOX").describe("Folder the original email is in"),
+      body: z.string().describe("Reply body (plain text)"),
+      html: z.string().optional().describe("Optional HTML version of the reply"),
+      replyAll: z.boolean().default(false).describe("Reply to all recipients (default: false)")
+    },
+    async ({ uid, folder, body, html, replyAll }) => {
+      const original = await fetchParsedMessage(uid, folder);
+      const mailOptions = buildReplyMailOptions(original, body, html, replyAll);
+      const info = await sendMail(mailOptions);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                messageId: info.messageId,
+                to: mailOptions.to,
+                subject: mailOptions.subject,
+                inReplyTo: original.messageId
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+  );
+}
 server.tool(
   "move_email",
   "Move an email to a different folder (e.g., move to Trash, Archive).",
@@ -725,19 +832,19 @@ server.tool(
       }
     })
 );
-async function findTrashPath(client) {
+async function findSpecialUsePath(client, specialUse, fallback) {
   const tree = await client.listTree();
   const stack = [...tree.folders || []];
   while (stack.length > 0) {
     const item = stack.pop();
-    if (item.specialUse === "\\Trash") {
+    if (item.specialUse === specialUse) {
       return item.path;
     }
     if (item.folders) {
       stack.push(...item.folders);
     }
   }
-  return "Trash";
+  return fallback;
 }
 server.tool(
   "delete_email",
@@ -747,7 +854,7 @@ server.tool(
     folder: z.string().default("INBOX").describe("Folder the email is in")
   },
   async ({ uid, folder }) => withImapClient(async (client) => {
-      const trashPath = await findTrashPath(client);
+      const trashPath = await findSpecialUsePath(client, "\\Trash", "Trash");
       const lock = await client.getMailboxLock(folder);
       try {
         await client.messageMove(`${uid}`, trashPath, { uid: true });

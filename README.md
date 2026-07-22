@@ -28,8 +28,9 @@ with the original author (tamlut-modnys).
 - List recent emails in a folder
 - Read full email content
 - Search emails by sender, subject, body, date, and unread status
-- Send new emails
-- Reply to emails with proper threading headers
+- Create draft emails (and reply drafts with proper threading headers) in the
+  Drafts folder for you to review and send yourself
+- Optionally (off by default) send or reply directly via SMTP
 - Move messages between folders
 - Mark messages read, unread, flagged, or unflagged
 - Delete emails (move to Trash)
@@ -74,6 +75,16 @@ If you switched Bridge's SMTP connection mode to SSL (implicit TLS), set
 `PROTON_BRIDGE_SMTP_SECURE="true"` (in the environment or in the credentials
 file).
 
+## Sending is disabled by default
+
+Out of the box this server cannot send email. The `send_email` and
+`reply_to_email` tools are only registered when you explicitly set
+`PROTON_BRIDGE_ALLOW_SEND="true"` (in the environment or in the credentials
+file); without it, the MCP client does not even see them. Instead, the
+`create_draft` and `create_reply_draft` tools save a message to your Drafts
+folder over IMAP. Bridge syncs it to Proton, so it shows up in your regular
+mail clients where you can review, edit, and send it yourself.
+
 ## Connect it to an MCP client
 
 For Claude Desktop, add this entry to `claude_desktop_config.json`
@@ -102,8 +113,10 @@ Mail tools on launch.
 - `list_emails(folder="INBOX", limit=20)`
 - `read_email(uid, folder="INBOX")`
 - `search_emails(folder="INBOX", from, subject, body, since, before, unseen, limit=20)`
-- `send_email(to, subject, body, html, cc, bcc)`
-- `reply_to_email(uid, folder="INBOX", body, html, replyAll=false)`
+- `create_draft(to, subject, body, html, cc, bcc)`
+- `create_reply_draft(uid, folder="INBOX", body, html, replyAll=false)`
+- `send_email(to, subject, body, html, cc, bcc)` — only with `PROTON_BRIDGE_ALLOW_SEND`
+- `reply_to_email(uid, folder="INBOX", body, html, replyAll=false)` — only with `PROTON_BRIDGE_ALLOW_SEND`
 - `move_email(uid, sourceFolder="INBOX", destinationFolder)`
 - `mark_email(uid, folder="INBOX", action)`
 - `delete_email(uid, folder="INBOX")`
@@ -125,7 +138,10 @@ errors.
 - Reads Bridge credentials from environment variables or `~/.proton-bridge-credentials`
 - Uses IMAP via `imapflow` for listing, searching, reading, moving, flagging,
   and deleting mail
-- Uses SMTP via `nodemailer` for sending and replying
+- Saves drafts over IMAP (composed with `nodemailer`'s MailComposer) so they
+  sync to Proton via Bridge
+- Uses SMTP via `nodemailer` for sending and replying (only when
+  `PROTON_BRIDGE_ALLOW_SEND` is enabled)
 - Reuses IMAP and SMTP connections inside each MCP process, with automatic idle
   cleanup and reconnect-once behavior for stale Bridge connections
 - Uses `mailparser` when reading or replying so the client gets structured
