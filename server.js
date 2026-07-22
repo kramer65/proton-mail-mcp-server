@@ -69,6 +69,10 @@ function unrefTimer(timer) {
     timer.unref();
   }
 }
+function isLoopbackHost(host) {
+  const h = (host || "").toLowerCase();
+  return h === "localhost" || h === "::1" || h.startsWith("127.");
+}
 function createImapClient() {
   const client = new ImapFlow({
     host: CONFIG.host,
@@ -79,8 +83,8 @@ function createImapClient() {
       pass: CONFIG.password
     },
     tls: {
-      rejectUnauthorized: false
-      // Bridge uses a self-signed cert
+      // Bridge uses a self-signed cert; only skip validation for local Bridge
+      rejectUnauthorized: !isLoopbackHost(CONFIG.host)
     },
     logger: false
   });
@@ -219,8 +223,8 @@ function createSmtpTransport() {
       pass: CONFIG.password
     },
     tls: {
-      rejectUnauthorized: false
-      // Bridge uses a self-signed cert
+      // Bridge uses a self-signed cert; only skip validation for local Bridge
+      rejectUnauthorized: !isLoopbackHost(CONFIG.host)
     }
   });
 }
