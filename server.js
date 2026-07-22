@@ -30,6 +30,7 @@ function loadConfig() {
         if (key === "PROTON_BRIDGE_HOST") process.env.PROTON_BRIDGE_HOST = val;
         if (key === "PROTON_BRIDGE_IMAP_PORT") process.env.PROTON_BRIDGE_IMAP_PORT = val;
         if (key === "PROTON_BRIDGE_SMTP_PORT") process.env.PROTON_BRIDGE_SMTP_PORT = val;
+        if (key === "PROTON_BRIDGE_SMTP_SECURE") process.env.PROTON_BRIDGE_SMTP_SECURE = val;
       }
     } catch {
     }
@@ -41,6 +42,7 @@ var CONFIG = {
   host: process.env.PROTON_BRIDGE_HOST || "127.0.0.1",
   imapPort: parseInt(process.env.PROTON_BRIDGE_IMAP_PORT || "1143", 10),
   smtpPort: parseInt(process.env.PROTON_BRIDGE_SMTP_PORT || "1025", 10),
+  smtpSecure: /^(1|true|yes)$/i.test(process.env.PROTON_BRIDGE_SMTP_SECURE || ""),
   username: creds.username,
   password: creds.password
 };
@@ -206,11 +208,12 @@ function createSmtpTransport() {
   return nodemailer.createTransport({
     host: CONFIG.host,
     port: CONFIG.smtpPort,
-    secure: true,
+    // Proton Bridge defaults to STARTTLS on 1025; set PROTON_BRIDGE_SMTP_SECURE=true for implicit TLS
+    secure: CONFIG.smtpSecure,
+    requireTLS: !CONFIG.smtpSecure,
     pool: true,
     maxConnections: 1,
     maxMessages: 100,
-    // Proton Bridge SMTP uses implicit SSL
     auth: {
       user: CONFIG.username,
       pass: CONFIG.password

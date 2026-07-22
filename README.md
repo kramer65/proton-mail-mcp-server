@@ -68,6 +68,12 @@ Only the username and password are required if you use Bridge's default local
 ports. The password is the Bridge password shown in the Proton Mail Bridge
 app, not your Proton account password.
 
+By default the server connects to SMTP with STARTTLS (and requires the
+upgrade to succeed), which matches Proton Bridge's default security setting.
+If you switched Bridge's SMTP connection mode to SSL (implicit TLS), set
+`PROTON_BRIDGE_SMTP_SECURE="true"` (in the environment or in the credentials
+file).
+
 ## Connect it to an MCP client
 
 For Claude Desktop, add this entry to `claude_desktop_config.json`
