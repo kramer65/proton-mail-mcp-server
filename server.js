@@ -3,6 +3,7 @@ import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { simpleParser } from "mailparser";
+import { selectBody } from "./body.js";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -545,7 +546,7 @@ server.tool(
 );
 server.tool(
   "read_email",
-  "Read the full content of a specific email by its UID. Returns headers, plain text body, and attachment names.",
+  "Read the full content of a specific email by its UID. Returns headers, the body as plain text, the raw HTML body when the message has one, and attachment names. The plain text comes from the message's text/plain part; when that part is missing or holds only invisible padding, it is derived from the text/html part instead. The bodySource field reports which was used ('plain', 'html', or 'none'), so an empty message is distinguishable from a parsing failure. The html field carries the raw HTML for clients that prefer to render it themselves, or null when the message has no HTML part. Inline images stay as cid: references that match the listed attachments rather than being expanded into the HTML, and any oversized base64 payload embedded by the sender is replaced by a marker naming what was dropped.",
   {
     uid: z.number().describe("The UID of the email to read"),
     folder: z.string().default("INBOX").describe("Folder the email is in (default: INBOX)")
@@ -557,7 +558,11 @@ server.tool(
           source: true,
           uid: true
         }, { uid: true });
-        const parsed = await simpleParser(rawMessage.source);
+        // keepCidLinks stops mailparser from inlining every referenced
+        // attachment into the HTML as a base64 data URI, which would bloat the
+        // response. The cid: values line up with the attachments listed below.
+        const parsed = await simpleParser(rawMessage.source, { keepCidLinks: true });
+        const body = selectBody(parsed);
         const result = {
           uid,
           subject: parsed.subject || "(no subject)",
@@ -567,7 +572,9 @@ server.tool(
           date: parsed.date?.toISOString() || null,
           messageId: parsed.messageId || null,
           inReplyTo: parsed.inReplyTo || null,
-          text: parsed.text || "",
+          text: body.text,
+          html: body.html,
+          bodySource: body.bodySource,
           attachments: (parsed.attachments || []).map((a) => ({
             filename: a.filename,
             contentType: a.contentType,

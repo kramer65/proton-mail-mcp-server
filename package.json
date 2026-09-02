@@ -7,13 +7,15 @@
     "proton-mail-mcp-server": "server.js"
   },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "html-to-text": "10.0.0",
     "imapflow": "1.4.8",
     "mailparser": "3.9.14",
     "nodemailer": "9.0.3",
