@@ -51,6 +51,11 @@ Correctness:
   returns an empty body for these messages
 - `read_email` no longer expands inline images into base64 inside the returned
   HTML, which kept a message's body needlessly large
+- `read_email` inlines text attachments, parses calendar invites and extracts
+  the text of PDF attachments, and `read_attachment` fetches images and other
+  files, so the date of an appointment or the amount on an invoice are
+  reachable instead of being hidden behind a filename (see
+  [Attachments](#attachments))
 - Reply-all no longer duplicates recipients, and no longer addresses the reply
   back to your own account
 - The server shuts down promptly when the MCP client disconnects, instead of
@@ -71,7 +76,7 @@ Correctness:
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 22.13+ (pdf.js requires it)
 - Proton Mail Bridge installed and logged in
 - An MCP client (e.g. Claude Desktop or Claude Code)
 
@@ -146,6 +151,7 @@ Mail tools on launch.
 - `list_folders()`
 - `list_emails(folder="INBOX", limit=20)`
 - `read_email(uid, folder="INBOX")` — see [Reading message bodies](#reading-message-bodies)
+- `read_attachment(uid, folder="INBOX", index, filename)` — see [Attachments](#attachments)
 - `search_emails(folder="INBOX", from, subject, body, since, before, unseen, limit=20)`
 - `create_draft(to, subject, body, html, cc, bcc)`
 - `create_reply_draft(uid, folder="INBOX", body, html, replyAll=false)`
@@ -194,6 +200,57 @@ kept small enough to be worth reading:
   markup is untouched.
 
 Neither affects `text`, which is always derived from the full HTML.
+
+## Attachments
+
+Appointment confirmations and invoices routinely carry their real content in
+an attachment while the body holds boilerplate: a meeting invite's date lives
+in a `text/calendar` part, a scanned invoice is an inline JPEG. `mailparser`
+files everything that is not the text or HTML body under `attachments`,
+including calendar parts, which it lists without a filename.
+
+`read_email` describes every attachment with `index`, `filename`,
+`contentType`, `size`, `disposition` and `cid`. Three kinds carry more:
+
+- Text attachments (`text/*` and `application/ics`) up to 64 kB include
+  their decoded `content`, using the part's own charset. Larger ones list a
+  `note` pointing at `read_attachment` instead.
+- Calendar parts (`text/calendar`, `application/ics`) also include a parsed
+  `calendar` object: the `method` (`REQUEST`, `CANCEL`, ...) and one entry
+  per event with `summary`, `start`, `end`, `timezone`, `allDay`,
+  `location`, `organizer`, `attendees`, `status`, `recurrence`,
+  `description` and `uid`. Times are reported as written in the invite with
+  their `TZID`, or with a trailing `Z` and timezone `UTC`; nothing is
+  converted. Folded lines, escaped text and quoted parameters are handled;
+  `VTIMEZONE` and `VALARM` are skipped.
+- PDF attachments up to 8 MB include the text of their text layer in
+  `content` (up to 64 kB, page by page, table rows kept on one line), plus
+  `pages` and `pdfInfo` (title, author, producer, dates when present). A
+  scanned PDF has no text layer; it is listed with a `note` saying so rather
+  than with empty content. A PDF that cannot be parsed, or is password
+  protected, likewise gets a `note` and never fails the whole call.
+
+`read_attachment` fetches one attachment by `index` (as listed by
+`read_email`) or `filename` (case-insensitive). What comes back depends on
+the type:
+
+| Type | Returned as | Limit |
+| --- | --- | --- |
+| `text/*`, `.ics` | decoded text, plus `calendar` for invites | 1 MB, truncated beyond that |
+| `application/pdf` | the text layer, page by page, with `pages` and `pdfInfo` | 8 MB file, 1 MB of text, first 50 pages |
+| `image/*` | an MCP image content block the model can look at | 4 MB |
+| anything else | base64 in `contentBase64` | 1 MB |
+
+Above the limit the response carries the metadata and a `note` instead. A
+PDF's own bytes are never returned, since base64 of a PDF is of no use to a
+model; the text layer is what it needs.
+
+PDF text comes from [pdf.js](https://github.com/mozilla/pdf.js) (`pdfjs-dist`),
+loaded on first use. Only the text layer is read. Rendering pages to images,
+which is what reading a scanned PDF would take, needs pdf.js's optional native
+canvas package; that is a 30 MB platform-specific binary and is deliberately
+left out via `omit=optional` in `.npmrc`. pdf.js 6 requires Node 22.13 or
+newer, which is why `engines` says so.
 
 ## Local smoke test
 

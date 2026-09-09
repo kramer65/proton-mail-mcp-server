@@ -201,3 +201,226 @@ export const NO_BODY_AT_ALL = join([
   "",
   ""
 ]);
+
+// Meeting invite as Google Calendar and Outlook send it: the plain part is
+// boilerplate, and the date, place and attendees live only in a text/calendar
+// alternative. Lines are folded, the description is escaped, one attendee's
+// CN contains a colon, and there is a VTIMEZONE and a VALARM to skip.
+const ICS_INVITE = join([
+  "BEGIN:VCALENDAR",
+  "PRODID:-//Example//Agenda//NL",
+  "VERSION:2.0",
+  "METHOD:REQUEST",
+  "BEGIN:VTIMEZONE",
+  "TZID:Europe/Amsterdam",
+  "BEGIN:STANDARD",
+  "DTSTART:19701025T030000",
+  "TZOFFSETFROM:+0200",
+  "TZOFFSETTO:+0100",
+  "END:STANDARD",
+  "END:VTIMEZONE",
+  "BEGIN:VEVENT",
+  "UID:afspraak-42@example.org",
+  "DTSTART;TZID=Europe/Amsterdam:20260915T100000",
+  "DTEND;TZID=Europe/Amsterdam:20260915T113000",
+  "SUMMARY:Kwartaaloverleg Q3",
+  "LOCATION:Vergaderzaal 2\\, Hoofdkantoor",
+  "DESCRIPTION:Agenda:\\n1. Cijfers\\n2. Planning\\; een lange regel die door de",
+  "  afzender is gevouwen omdat hij te lang was",
+  'ORGANIZER;CN="Planning: Team":mailto:planning@example.org',
+  "ATTENDEE;CN=Ontvanger;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:ontvanger@exam",
+  " ple.net",
+  "ATTENDEE;CN=Collega:mailto:collega@example.org",
+  "STATUS:CONFIRMED",
+  "BEGIN:VALARM",
+  "TRIGGER:-PT15M",
+  "ACTION:DISPLAY",
+  "DESCRIPTION:Herinnering",
+  "END:VALARM",
+  "END:VEVENT",
+  "END:VCALENDAR",
+  ""
+]);
+
+export const CALENDAR_INVITE = join([
+  "From: Planning <planning@example.org>",
+  "To: Ontvanger <ontvanger@example.net>",
+  "Subject: Uitnodiging: Kwartaaloverleg Q3",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/alternative; boundary="ALT"',
+  "",
+  "--ALT",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "Je bent uitgenodigd voor een afspraak. Open de bijlage voor details.",
+  "",
+  "--ALT",
+  "Content-Type: text/calendar; charset=utf-8; method=REQUEST",
+  "Content-Transfer-Encoding: base64",
+  "",
+  Buffer.from(ICS_INVITE).toString("base64"),
+  "",
+  "--ALT--",
+  ""
+]);
+
+// The same invite shipped as a named .ics file attachment, with a UTC time
+// and an all-day follow-up event. No METHOD line in the file itself.
+const ICS_FILE = join([
+  "BEGIN:VCALENDAR",
+  "VERSION:2.0",
+  "BEGIN:VEVENT",
+  "UID:bezoek-7@example.org",
+  "DTSTART:20261001T080000Z",
+  "DTEND:20261001T090000Z",
+  "SUMMARY:Bezoek monteur",
+  "END:VEVENT",
+  "BEGIN:VEVENT",
+  "UID:vrij-8@example.org",
+  "DTSTART;VALUE=DATE:20261002",
+  "DTEND;VALUE=DATE:20261003",
+  "SUMMARY:Hele dag vrij",
+  "END:VEVENT",
+  "END:VCALENDAR",
+  ""
+]);
+
+export const CALENDAR_ICS_ATTACHMENT = join([
+  "From: Installateur <service@example.org>",
+  "Subject: Bevestiging bezoek",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/mixed; boundary="MIX"',
+  "",
+  "--MIX",
+  "Content-Type: text/html; charset=utf-8",
+  "",
+  "<html><body><p>Uw afspraak is ingepland, zie de bijgevoegde agenda-afspraak.</p></body></html>",
+  "",
+  "--MIX",
+  'Content-Type: application/ics; name="afspraak.ics"',
+  "Content-Transfer-Encoding: base64",
+  'Content-Disposition: attachment; filename="afspraak.ics"',
+  "",
+  Buffer.from(ICS_FILE).toString("base64"),
+  "",
+  "--MIX--",
+  ""
+]);
+
+// A CSV export in Latin-1, the shape of a bank or webshop statement.
+export const CSV_ATTACHMENT = join([
+  "From: Bank <info@example.org>",
+  "Subject: Afschrift",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/mixed; boundary="MIX"',
+  "",
+  "--MIX",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "Bijgaand uw afschrift.",
+  "",
+  "--MIX",
+  'Content-Type: text/csv; charset=iso-8859-1; name="afschrift.csv"',
+  "Content-Transfer-Encoding: base64",
+  'Content-Disposition: attachment; filename="afschrift.csv"',
+  "",
+  Buffer.from("datum;omschrijving;bedrag\r\n2026-09-01;Caf\xe9;12,50\r\n", "latin1").toString("base64"),
+  "",
+  "--MIX--",
+  ""
+]);
+
+// An invoice whose only content is a scan, sent as an inline JPEG.
+const TINY_JPEG =
+  "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
+
+export const INLINE_IMAGE_INVOICE = join([
+  "From: Klusser <klus@example.org>",
+  "Subject: Factuur september",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/related; boundary="REL"',
+  "",
+  "--REL",
+  "Content-Type: text/html; charset=utf-8",
+  "",
+  '<html><body><p>Hierbij de factuur.</p><img src="cid:scan"></body></html>',
+  "",
+  "--REL",
+  "Content-Type: image/jpeg",
+  "Content-Transfer-Encoding: base64",
+  "Content-ID: <scan>",
+  'Content-Disposition: inline; filename="factuur-scan.jpg"',
+  "",
+  TINY_JPEG,
+  "",
+  "--REL--",
+  ""
+]);
+
+// A text-layer PDF invoice with a table, the way accounting software emits
+// one, plus a second page. Built by hand so no converter is needed.
+import { makePdf } from "./pdf-fixture.js";
+
+export const INVOICE_PDF_BYTES = makePdf([
+  [
+    "Factuur 2026-0917",
+    "Klusbedrijf Jansen",
+    "Factuurdatum: 9 september 2026",
+    "Vervaldatum: 30 september 2026",
+    "",
+    [[50, "Omschrijving"], [250, "Aantal"], [330, "Prijs"], [420, "Bedrag"]],
+    [[50, "Arbeid"], [250, "4"], [330, "EUR 55,00"], [420, "EUR 220,00"]],
+    [[50, "Materiaal"], [250, "1"], [330, "EUR 80,00"], [420, "EUR 80,00"]],
+    [[50, "Totaal incl. btw"], [420, "EUR 363,00"]],
+    "Gelieve te betalen op NL00BANK0123456789 o.v.v. 2026-0917."
+  ],
+  ["Algemene voorwaarden", "Betaling binnen 21 dagen."]
+], { title: "Factuur 2026-0917" });
+
+export const PDF_INVOICE = join([
+  "From: Klusbedrijf Jansen <factuur@example.org>",
+  "Subject: Factuur 2026-0917",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/mixed; boundary="MIX"',
+  "",
+  "--MIX",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "Beste klant, bijgaand uw factuur. Met vriendelijke groet.",
+  "",
+  "--MIX",
+  'Content-Type: application/pdf; name="factuur-2026-0917.pdf"',
+  "Content-Transfer-Encoding: base64",
+  'Content-Disposition: attachment; filename="factuur-2026-0917.pdf"',
+  "",
+  INVOICE_PDF_BYTES.toString("base64"),
+  "",
+  "--MIX--",
+  ""
+]);
+
+// A PDF with no text layer at all, as a scanner produces, sent with the
+// generic octet-stream type some mail clients use.
+export const SCANNED_PDF_BYTES = makePdf([[]]);
+
+export const SCANNED_PDF = join([
+  "From: Scanner <scan@example.org>",
+  "Subject: Scan",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/mixed; boundary="MIX"',
+  "",
+  "--MIX",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "Zie bijlage.",
+  "",
+  "--MIX",
+  'Content-Type: application/octet-stream; name="scan.pdf"',
+  "Content-Transfer-Encoding: base64",
+  'Content-Disposition: attachment; filename="scan.pdf"',
+  "",
+  SCANNED_PDF_BYTES.toString("base64"),
+  "",
+  "--MIX--",
+  ""
+]);

@@ -4,6 +4,7 @@ import nodemailer from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { simpleParser } from "mailparser";
 import { selectBody } from "./body.js";
+import { describeAttachments, findAttachment, attachmentContent } from "./attachments.js";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -546,7 +547,7 @@ server.tool(
 );
 server.tool(
   "read_email",
-  "Read the full content of a specific email by its UID. Returns headers, the body as plain text, the raw HTML body when the message has one, and attachment names. The plain text comes from the message's text/plain part; when that part is missing or holds only invisible padding, it is derived from the text/html part instead. The bodySource field reports which was used ('plain', 'html', or 'none'), so an empty message is distinguishable from a parsing failure. The html field carries the raw HTML for clients that prefer to render it themselves, or null when the message has no HTML part. Inline images stay as cid: references that match the listed attachments rather than being expanded into the HTML, and any oversized base64 payload embedded by the sender is replaced by a marker naming what was dropped.",
+  "Read the full content of a specific email by its UID. Returns headers, the body as plain text, the raw HTML body when the message has one, and the attachments. The plain text comes from the message's text/plain part; when that part is missing or holds only invisible padding, it is derived from the text/html part instead. The bodySource field reports which was used ('plain', 'html', or 'none'), so an empty message is distinguishable from a parsing failure. The html field carries the raw HTML for clients that prefer to render it themselves, or null when the message has no HTML part. Inline images stay as cid: references that match the listed attachments rather than being expanded into the HTML, and any oversized base64 payload embedded by the sender is replaced by a marker naming what was dropped. Each attachment is listed with its index, filename, contentType, size, disposition and cid. Text attachments (text/*, .ics) up to 64 kB carry their decoded content inline; calendar parts additionally carry a parsed 'calendar' object with the method and each event's summary, start, end, timezone, location, organizer and attendees. PDF attachments carry the text of their text layer in 'content' (up to 64 kB, page by page) plus 'pages' and 'pdfInfo'; a scanned PDF without a text layer says so in 'note'. For meeting invites, appointment confirmations and invoices the real detail usually lives in these attachments rather than in the body, so consult them before answering. Use read_attachment to fetch an image or an oversized attachment in full.",
   {
     uid: z.number().describe("The UID of the email to read"),
     folder: z.string().default("INBOX").describe("Folder the email is in (default: INBOX)")
@@ -575,15 +576,37 @@ server.tool(
           text: body.text,
           html: body.html,
           bodySource: body.bodySource,
-          attachments: (parsed.attachments || []).map((a) => ({
-            filename: a.filename,
-            contentType: a.contentType,
-            size: a.size
-          }))
+          attachments: await describeAttachments(parsed)
         };
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
         };
+      } finally {
+        lock.release();
+      }
+    })
+);
+server.tool(
+  "read_attachment",
+  "Fetch one attachment of an email, selected by the index or filename reported by read_email. Text attachments (text/*, .ics) are returned decoded, with parsed calendar events for .ics; PDFs are returned as the text of their text layer, page by page, with the page count and document info, which is how to read an invoice or contract (a scanned PDF has no text layer and is reported as such); images are returned as an image content block so they can be looked at directly, which is how to read an invoice or appointment that was sent as a picture; other binaries are returned as base64 in contentBase64. Size limits: 1 MB for text (truncated beyond that), 8 MB for PDFs, 4 MB for images and 1 MB for other binaries; larger attachments come back with metadata and a note instead.",
+  {
+    uid: z.number().describe("The UID of the email"),
+    folder: z.string().default("INBOX").describe("Folder the email is in (default: INBOX)"),
+    index: z.number().int().optional().describe("Zero-based index of the attachment as listed by read_email; takes precedence over filename"),
+    filename: z.string().optional().describe("Filename of the attachment as listed by read_email (case-insensitive)")
+  },
+  async ({ uid, folder, index, filename }) => withImapClient(async (client) => {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const rawMessage = await client.fetchOne(`${uid}`, {
+          source: true,
+          uid: true
+        }, { uid: true });
+        // Parsed the same way as read_email so the attachment indexes line up.
+        const parsed = await simpleParser(rawMessage.source, { keepCidLinks: true });
+        const attachment = findAttachment(parsed, { index, filename });
+        const resolvedIndex = parsed.attachments.indexOf(attachment);
+        return { content: await attachmentContent(attachment, resolvedIndex) };
       } finally {
         lock.release();
       }

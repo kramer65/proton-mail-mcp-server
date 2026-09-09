@@ -11,7 +11,7 @@
     "test": "node --test test/*.test.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
@@ -19,6 +19,7 @@
     "imapflow": "1.4.8",
     "mailparser": "3.9.14",
     "nodemailer": "9.0.3",
+    "pdfjs-dist": "6.3.289",
     "zod": "4.4.3"
   }
 }
