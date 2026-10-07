@@ -58,6 +58,11 @@ Correctness:
   [Attachments](#attachments))
 - Reply-all no longer duplicates recipients, and no longer addresses the reply
   back to your own account
+- Drafts keep their Bcc recipients. MailComposer drops the Bcc header by
+  default, so a draft created with `bcc` used to arrive in Proton without it
+- Messages can be referenced by `messageId` instead of `uid`, because UIDs in
+  Bridge's All Mail folder are not stable across sessions (see
+  [Referring to messages](#referring-to-messages))
 - The server shuts down promptly when the MCP client disconnects, instead of
   leaving the process and its Bridge connections behind
 
@@ -67,8 +72,9 @@ Correctness:
 - List recent emails in a folder
 - Read full email content
 - Search emails by sender, subject, body, date, and unread status
-- Create draft emails (and reply drafts with proper threading headers) in the
-  Drafts folder for you to review and send yourself
+- Create draft emails and reply drafts in the Drafts folder, with file
+  attachments, for you to review and send yourself
+- Update an existing draft in place of creating another one
 - Optionally (off by default) send or reply directly via SMTP
 - Move messages between folders
 - Mark messages read, unread, flagged, or unflagged
@@ -149,17 +155,99 @@ Mail tools on launch.
 ## Available tools
 
 - `list_folders()`
-- `list_emails(folder="INBOX", limit=20)`
-- `read_email(uid, folder="INBOX")` — see [Reading message bodies](#reading-message-bodies)
-- `read_attachment(uid, folder="INBOX", index, filename)` — see [Attachments](#attachments)
-- `search_emails(folder="INBOX", from, subject, body, since, before, unseen, limit=20)`
-- `create_draft(to, subject, body, html, cc, bcc)`
-- `create_reply_draft(uid, folder="INBOX", body, html, replyAll=false)`
-- `send_email(to, subject, body, html, cc, bcc)` — only with `PROTON_BRIDGE_ALLOW_SEND`
-- `reply_to_email(uid, folder="INBOX", body, html, replyAll=false)` — only with `PROTON_BRIDGE_ALLOW_SEND`
-- `move_email(uid, sourceFolder="INBOX", destinationFolder)`
-- `mark_email(uid, folder="INBOX", action)`
-- `delete_email(uid, folder="INBOX")`
+- `list_emails(folder="INBOX", limit=20)` — each message with `uid`, `messageId` and `hasAttachments`
+- `read_email(uid | messageId, folder="INBOX")` — see [Reading message bodies](#reading-message-bodies)
+- `read_attachment(uid | messageId, folder="INBOX", index, filename)` — see [Attachments](#attachments)
+- `search_emails(folder="INBOX", from, subject, body, since, before, unseen, limit=20)` — same fields as `list_emails`
+- `create_draft(to, subject, body, html, cc, bcc, attachments)`
+- `create_reply_draft(uid | messageId, folder="INBOX", body, html, replyAll=false, attachments)`
+- `update_draft(uid | messageId, folder="Drafts", to, cc, bcc, subject, body, html, attachments, keepAttachments=true)` — see [Updating a draft](#updating-a-draft)
+- `send_email(to, subject, body, html, cc, bcc, attachments)` — only with `PROTON_BRIDGE_ALLOW_SEND`
+- `reply_to_email(uid | messageId, folder="INBOX", body, html, replyAll=false, attachments)` — only with `PROTON_BRIDGE_ALLOW_SEND`
+- `move_email(uid | messageId, sourceFolder="INBOX", destinationFolder)`
+- `mark_email(uid | messageId, folder="INBOX", action)`
+- `delete_email(uid | messageId, folder="INBOX")`
+
+`uid | messageId` means either one identifies the message; see
+[Referring to messages](#referring-to-messages).
+
+## Referring to messages
+
+Every tool that acts on one message takes a `uid`, a `messageId`, or both.
+`messageId` is the message's `Message-ID` header including the angle
+brackets, as returned by `list_emails`, `search_emails` and `read_email`.
+
+Prefer `messageId` in Bridge's `All Mail` folder. That folder is virtual, and
+its UIDs are not stable across sessions: a UID remembered from an earlier
+search can later point at a different message, and a reply draft then ends up
+answering the wrong mail. A `messageId` is looked up in the given folder on
+every call (an IMAP header search, confirmed against the exact value), so it
+always reaches the same message. When both are given they must refer to the
+same message, or the call is refused. When one `Message-ID` occurs more than
+once in a folder, pass the `uid` as well to pick one.
+
+## Attachments on drafts and outgoing mail
+
+`create_draft`, `create_reply_draft`, `update_draft`, `send_email` and
+`reply_to_email` take an optional `attachments` array:
+
+```json
+[
+  { "path": "/home/me/Documents/invoice.pdf" },
+  { "path": "~/export.csv", "filename": "transactions.csv", "contentType": "text/csv" }
+]
+```
+
+- `path` is an absolute path on the machine running the server; `~` is
+  expanded. `filename` defaults to the file's own name, `contentType` to the
+  type matching its extension.
+- Every path must be an existing regular file. If any one is not, the call
+  fails with that path in the error and nothing is created.
+- The total may not exceed 25 MB, about what Proton accepts per message. Above
+  that the call fails and the error names the largest files. For
+  `update_draft` the attachments the draft keeps count towards the total.
+- Set `PROTON_BRIDGE_ATTACHMENT_ROOT` (in the environment or the credentials
+  file) to only allow files below that directory. Symlinks are resolved before
+  the check, so a link inside the root cannot reach a file outside it.
+- The result lists what was attached as `attachments: [{ filename, size }]`.
+
+Attaching to drafts always works; `send_email` and `reply_to_email`, and so
+their attachments, exist only with `PROTON_BRIDGE_ALLOW_SEND`.
+
+## Updating a draft
+
+`update_draft` changes a draft instead of leaving a stale copy next to a new
+one. Only the fields passed change; pass an empty string to clear `to`, `cc`
+or `bcc`. Existing attachments are kept unless `keepAttachments` is `false`,
+and new ones are added. Inline images stay as long as the HTML still refers
+to them.
+
+The two body parts are kept in step, since Proton keeps only one of them (the
+HTML when there is one): a new `html` without a new `body` also rewrites the
+plain-text part from it, and a new `body` without a new `html` turns the draft
+into plain text rather than leave the old HTML in place.
+
+IMAP has no way to edit a message, so the draft is stored anew and the old one
+is removed afterwards; the result reports `oldUid` and `newUid`. If storing the
+new draft fails, the old one is untouched. If removing the old one fails, the
+call still succeeds and says so in `warning`, so a retry does not create yet
+another copy. Only messages carrying the `\Draft` flag are replaced; received
+mail is refused. Work in `Drafts` (the default) rather than `All Mail`, where a
+freshly stored draft may not be visible yet.
+
+### Threading of reply drafts
+
+`create_reply_draft` writes `In-Reply-To` and `References` into the draft, and
+`update_draft` carries them over. Whether Proton links the draft to the
+message it answers depends on Proton Bridge. A stock Bridge creates a draft in
+Proton from the subject, body, recipients, attachments and `Message-ID` only:
+the threading headers are gone when the draft is read back, and Proton does
+not link the draft to the original message. Bridge's own SMTP path does resolve the parent message; the
+IMAP draft path does not.
+[proton-bridge PR #526](https://github.com/ProtonMail/proton-bridge/pull/526)
+fixes this by resolving the parent for IMAP drafts too. With a Bridge built
+from that change, reply drafts keep both headers and appear in the original
+conversation.
 
 ## Reading message bodies
 
@@ -270,7 +358,8 @@ errors.
 - Uses IMAP via `imapflow` for listing, searching, reading, moving, flagging,
   and deleting mail
 - Saves drafts over IMAP (composed with `nodemailer`'s MailComposer) so they
-  sync to Proton via Bridge
+  sync to Proton via Bridge; updating a draft stores a new one and then
+  removes the old one
 - Uses SMTP via `nodemailer` for sending and replying (only when
   `PROTON_BRIDGE_ALLOW_SEND` is enabled)
 - Reuses IMAP and SMTP connections inside each MCP process, with automatic idle
