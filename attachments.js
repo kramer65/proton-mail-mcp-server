@@ -287,6 +287,24 @@ export async function describeAttachments(parsed, {
   }));
 }
 
+// Whether a message carries attachments, judged from its IMAP BODYSTRUCTURE
+// so list_emails and search_emails need not download every message. Parts
+// of a multipart/related (an HTML body's logos and embedded images) do not
+// count, nor do unnamed text/plain and text/html parts, which are the body.
+// Anything else does, including a part sent as inline with a filename, which
+// is how Apple Mail attaches a PDF.
+export function hasAttachments(node, parentType = null) {
+  if (!node) return false;
+  if (node.childNodes?.length) {
+    return node.childNodes.some((child) => hasAttachments(child, node.type));
+  }
+  if (node.disposition === "attachment") return true;
+  if (parentType === "multipart/related") return false;
+  const named = node.dispositionParameters?.filename || node.parameters?.name;
+  if (!named && /^text\/(plain|html)$/i.test(node.type || "")) return false;
+  return !/^multipart\//i.test(node.type || "");
+}
+
 // Locate one attachment by index or filename. Index wins when both are
 // given. Throws with the available choices so the caller can correct itself.
 export function findAttachment(parsed, { index, filename } = {}) {
