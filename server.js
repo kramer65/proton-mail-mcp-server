@@ -12,7 +12,9 @@ import {
   formatRecipient,
   composeDraftUpdate,
   assertTotalSize,
-  resolveMessageUid
+  resolveMessageUid,
+  resolveWritePath,
+  writeFileGuarded
 } from "./compose.js";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -41,6 +43,7 @@ function loadConfig() {
         if (key === "PROTON_BRIDGE_PASSWORD" && !password) password = val;
         if (key === "PROTON_BRIDGE_HOST") process.env.PROTON_BRIDGE_HOST = val;
         if (key === "PROTON_BRIDGE_IMAP_PORT") process.env.PROTON_BRIDGE_IMAP_PORT = val;
+        if (key === "PROTON_BRIDGE_SMTP_HOST") process.env.PROTON_BRIDGE_SMTP_HOST = val;
         if (key === "PROTON_BRIDGE_SMTP_PORT") process.env.PROTON_BRIDGE_SMTP_PORT = val;
         if (key === "PROTON_BRIDGE_SMTP_SECURE") process.env.PROTON_BRIDGE_SMTP_SECURE = val;
         if (key === "PROTON_BRIDGE_ALLOW_SEND") process.env.PROTON_BRIDGE_ALLOW_SEND = val;
@@ -55,6 +58,10 @@ var creds = loadConfig();
 var CONFIG = {
   host: process.env.PROTON_BRIDGE_HOST || "127.0.0.1",
   imapPort: parseInt(process.env.PROTON_BRIDGE_IMAP_PORT || "1143", 10),
+  // Bridge serves IMAP and SMTP from the same host; a hosted provider
+  // usually does not (imap.gmx.net vs mail.gmx.net). Falls back to the
+  // IMAP host, which keeps the single-host Bridge setup working unchanged.
+  smtpHost: process.env.PROTON_BRIDGE_SMTP_HOST || process.env.PROTON_BRIDGE_HOST || "127.0.0.1",
   smtpPort: parseInt(process.env.PROTON_BRIDGE_SMTP_PORT || "1025", 10),
   smtpSecure: /^(1|true|yes)$/i.test(process.env.PROTON_BRIDGE_SMTP_SECURE || ""),
   username: creds.username,
@@ -309,7 +316,7 @@ async function saveDraft(mailOptions) {
 }
 function createSmtpTransport() {
   return nodemailer.createTransport({
-    host: CONFIG.host,
+    host: CONFIG.smtpHost,
     port: CONFIG.smtpPort,
     // Proton Bridge defaults to STARTTLS on 1025; set PROTON_BRIDGE_SMTP_SECURE=true for implicit TLS
     secure: CONFIG.smtpSecure,
@@ -323,7 +330,7 @@ function createSmtpTransport() {
     },
     tls: {
       // Bridge uses a self-signed cert; only skip validation for local Bridge
-      rejectUnauthorized: !isLoopbackHost(CONFIG.host)
+      rejectUnauthorized: !isLoopbackHost(CONFIG.smtpHost)
     }
   });
 }
@@ -650,6 +657,46 @@ server.tool(
         const attachment = findAttachment(parsed, { index, filename });
         const resolvedIndex = parsed.attachments.indexOf(attachment);
         return { content: await attachmentContent(attachment, resolvedIndex) };
+      } finally {
+        lock.release();
+      }
+    })
+);
+server.tool(
+  "save_attachment",
+  "Write one attachment of an email to a file on the machine running this server, selected by the index or filename reported by read_email. Use this rather than read_attachment when the bytes have to end up on disk -- collecting invoice PDFs, for instance -- since read_attachment returns only a PDF's text layer and hands other binaries back as base64. The destination must be an absolute path (~ is expanded) whose directory already exists; an existing file is refused unless overwrite is true, and the server never writes through a symlink. When PROTON_BRIDGE_ATTACHMENT_ROOT is set, the destination must lie below that directory, the same limit that applies to attaching files. Returns the path written plus the attachment's filename, size and contentType. " + MESSAGE_ID_HINT,
+  {
+    ...messageRefShape("holding the attachment"),
+    folder: z.string().default("INBOX").describe("Folder the email is in (default: INBOX)"),
+    index: z.number().int().optional().describe("Zero-based index of the attachment as listed by read_email; takes precedence over filename"),
+    filename: z.string().optional().describe("Filename of the attachment as listed by read_email (case-insensitive)"),
+    path: z.string().describe("Absolute path of the file to write on the machine running this server; ~ is expanded. The directory must already exist"),
+    overwrite: z.boolean().default(false).describe("Replace the destination if it already exists (default: false)")
+  },
+  async ({ uid, messageId, folder, index, filename, path, overwrite }) => withImapClient(async (client) => {
+      // Resolved before the fetch, so a bad path fails without first pulling
+      // the whole message off the server.
+      const target = await resolveWritePath(path, { root: ATTACHMENT_ROOT });
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const rawMessage = await fetchMessage(client, folder, { uid, messageId });
+        // Parsed the same way as read_email so the attachment indexes line up.
+        const parsed = await simpleParser(rawMessage.source, { keepCidLinks: true });
+        const attachment = findAttachment(parsed, { index, filename });
+        const size = await writeFileGuarded(target, attachment.content, { overwrite });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                path: target,
+                filename: attachment.filename || null,
+                size,
+                contentType: attachment.contentType || null
+              }, null, 2)
+            }
+          ]
+        };
       } finally {
         lock.release();
       }

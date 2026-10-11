@@ -1,5 +1,5 @@
-import { readFile, realpath, stat } from "fs/promises";
-import { basename, isAbsolute, join, relative } from "path";
+import { lstat, readFile, realpath, stat, writeFile } from "fs/promises";
+import { basename, dirname, isAbsolute, join, relative } from "path";
 import { homedir } from "os";
 import { htmlToPlainText } from "./body.js";
 
@@ -223,4 +223,78 @@ export async function resolveMessageUid(client, folder, { uid, messageId } = {})
     );
   }
   return matches[0];
+}
+
+// Resolve an absolute destination path for writing a file to the host.
+//
+// The target itself need not exist yet, so the parent directory is resolved
+// with realpath and the basename appended, rather than resolving the target.
+// That keeps the root check symlink-proof -- a link inside the root cannot aim
+// a write outside it -- while still allowing a file that is not there yet.
+export async function resolveWritePath(requested, { root } = {}) {
+  const expanded = expandHome(requested || "");
+  if (!isAbsolute(expanded)) {
+    throw new Error(`Destination path must be absolute: ${requested}`);
+  }
+  const name = basename(expanded);
+  if (!name || name === "." || name === "..") {
+    throw new Error(`Destination path must name a file, not a directory: ${requested}`);
+  }
+  const parent = dirname(expanded);
+  let realParent;
+  try {
+    realParent = await realpath(parent);
+  } catch {
+    throw new Error(`Destination directory does not exist: ${parent}`);
+  }
+  if (!(await stat(realParent)).isDirectory()) {
+    throw new Error(`Destination parent is not a directory: ${parent}`);
+  }
+  const resolved = join(realParent, name);
+  if (root) {
+    let realRoot;
+    try {
+      realRoot = await realpath(expandHome(root));
+    } catch {
+      throw new Error(`PROTON_BRIDGE_ATTACHMENT_ROOT does not exist: ${root}`);
+    }
+    const rel = relative(realRoot, resolved);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(`Destination is outside PROTON_BRIDGE_ATTACHMENT_ROOT (${realRoot}): ${requested}`);
+    }
+  }
+  return resolved;
+}
+
+// Write `content` to an already-resolved path, refusing to clobber by default.
+// The exclusive flag does the existence check in the same syscall as the write,
+// so a file appearing in between cannot be overwritten by accident.
+export async function writeFileGuarded(resolvedPath, content, { overwrite = false } = {}) {
+  let info = null;
+  try {
+    info = await lstat(resolvedPath);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  if (info) {
+    if (!overwrite) {
+      throw new Error(`Destination already exists: ${resolvedPath}. Pass overwrite: true to replace it`);
+    }
+    // Writing through a symlink would land outside the directory just checked.
+    if (info.isSymbolicLink()) {
+      throw new Error(`Destination is a symlink, refusing to write through it: ${resolvedPath}`);
+    }
+    if (!info.isFile()) {
+      throw new Error(`Destination exists and is not a regular file: ${resolvedPath}`);
+    }
+  }
+  try {
+    await writeFile(resolvedPath, content, { flag: overwrite ? "w" : "wx" });
+  } catch (err) {
+    if (err.code === "EEXIST") {
+      throw new Error(`Destination already exists: ${resolvedPath}. Pass overwrite: true to replace it`);
+    }
+    throw err;
+  }
+  return content.length;
 }

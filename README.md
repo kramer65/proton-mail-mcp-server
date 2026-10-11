@@ -38,7 +38,8 @@ Security and safety:
 - TLS certificates are validated for non-loopback hosts; validation is skipped
   only for a local Bridge with its self-signed certificate
 - SMTP connection security is configurable (`PROTON_BRIDGE_SMTP_SECURE`)
-  instead of being hard-wired
+  instead of being hard-wired, and the SMTP host can be set apart from the
+  IMAP host (`PROTON_BRIDGE_SMTP_HOST`)
 - Sending is off by default: the server creates drafts for review, and
   `send_email` and `reply_to_email` are exposed only with
   `PROTON_BRIDGE_ALLOW_SEND`
@@ -51,6 +52,9 @@ Correctness:
   returns an empty body for these messages
 - `read_email` no longer expands inline images into base64 inside the returned
   HTML, which kept a message's body needlessly large
+- `save_attachment` writes an attachment to a file on the host, within the
+  same `PROTON_BRIDGE_ATTACHMENT_ROOT` limit, refusing to clobber or to follow
+  a symlink
 - `read_email` inlines text attachments, parses calendar invites and extracts
   the text of PDF attachments, and `read_attachment` fetches images and other
   files, so the date of an appointment or the amount on an invoice are
@@ -152,12 +156,70 @@ If `node` is not on the client's PATH, use the absolute path from
 `which node`. Then fully restart the client; it should discover the Proton
 Mail tools on launch.
 
+## Using another IMAP provider
+
+Nothing here is Proton-specific beyond the defaults. The server talks plain
+IMAP and SMTP through `imapflow` and `nodemailer`, folders come from whatever
+the server advertises rather than from an assumed layout, and a provider that
+offers IMAP on port 143 with STARTTLS -- gmx, for one -- needs no code change
+at all. Point a second instance at it with `env`:
+
+```json
+{
+  "mcpServers": {
+    "proton-mail": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/server.js"]
+    },
+    "gmx-mail": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/server.js"],
+      "env": {
+        "PROTON_BRIDGE_USERNAME": "you@gmx.com",
+        "PROTON_BRIDGE_PASSWORD": "your-gmx-password",
+        "PROTON_BRIDGE_HOST": "imap.gmx.com",
+        "PROTON_BRIDGE_IMAP_PORT": "143",
+        "PROTON_BRIDGE_SMTP_HOST": "mail.gmx.com",
+        "PROTON_BRIDGE_SMTP_PORT": "587"
+      }
+    }
+  }
+}
+```
+
+Credentials given in `env` take precedence over the credentials file, so the
+two instances do not read each other's account. `PROTON_BRIDGE_SMTP_HOST` is
+optional and falls back to `PROTON_BRIDGE_HOST`, which is what Bridge wants
+since it serves both from `127.0.0.1`. STARTTLS is required on both ports and
+certificates are validated for any non-loopback host, so neither session is
+left in the clear. The variable names keep their `PROTON_BRIDGE_` prefix
+whatever the provider; they are this server's own settings.
+
+Both instances expose the same tool names, so give them distinct keys
+(`proton-mail`, `gmx-mail`) -- that prefix is how the client tells them apart.
+One process serves one account: host, ports and credentials are read once at
+startup.
+
+At gmx, IMAP is off until you switch it on: in the webmail, under
+*Settings -> POP3 & IMAP*, enable IMAP access. Without that the login fails
+with an authentication error even though the password is right. That same
+page names the servers for your account -- `gmx.com` for an international
+account, `gmx.net` for a German one -- so take the hostnames from there
+rather than from this example.
+
+Folder names are the provider's own. `Drafts` and `Trash` are located through
+the IMAP SPECIAL-USE flags when the server advertises them, falling back to
+those English names otherwise; if your provider uses localised names and
+advertises no flags, pass the `folder` argument explicitly. `list_folders`
+shows what is actually there.
+
 ## Available tools
 
 - `list_folders()`
 - `list_emails(folder="INBOX", limit=20)` — each message with `uid`, `messageId` and `hasAttachments`
 - `read_email(uid | messageId, folder="INBOX")` — see [Reading message bodies](#reading-message-bodies)
 - `read_attachment(uid | messageId, folder="INBOX", index, filename)` — see [Attachments](#attachments)
+- `save_attachment(uid | messageId, folder="INBOX", index, filename, path, overwrite=false)` — see [Attachments](#attachments)
 - `search_emails(folder="INBOX", from, subject, body, since, before, unseen, limit=20)` — same fields as `list_emails`
 - `create_draft(to, subject, body, html, cc, bcc, attachments)`
 - `create_reply_draft(uid | messageId, folder="INBOX", body, html, replyAll=false, attachments)`
@@ -332,6 +394,28 @@ the type:
 Above the limit the response carries the metadata and a `note` instead. A
 PDF's own bytes are never returned, since base64 of a PDF is of no use to a
 model; the text layer is what it needs.
+
+`save_attachment` writes an attachment's bytes to a file instead of returning
+them. Use it when the file itself is the point -- collecting a year of invoice
+PDFs, say -- since `read_attachment` gives a PDF's text layer rather than the
+document, and hands other binaries back as base64 that a client cannot easily
+turn into a file. The attachment is selected the same way, by `index` or
+`filename`:
+
+```
+save_attachment(uid: 181, index: 0, path: "~/Facturen/hetzner-2026-07.pdf")
+-> { "path": "/home/you/Facturen/hetzner-2026-07.pdf",
+     "filename": "Hetzner_2026-07-04_089001030224.pdf",
+     "size": 68663, "contentType": "application/pdf" }
+```
+
+`path` must be absolute (`~` is expanded) and its directory must already
+exist; the server does not create directories. An existing file is refused
+unless `overwrite: true` is passed, and the server never writes through a
+symlink, so a link cannot redirect a write out of the directory that was
+checked. When `PROTON_BRIDGE_ATTACHMENT_ROOT` is set, the destination must lie
+below that root -- the same limit that applies to attaching files to a draft.
+There is no size cap beyond what IMAP itself delivers.
 
 PDF text comes from [pdf.js](https://github.com/mozilla/pdf.js) (`pdfjs-dist`),
 loaded on first use. Only the text layer is read. Rendering pages to images,
