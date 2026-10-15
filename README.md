@@ -368,6 +368,15 @@ kept small enough to be worth reading:
 
 Neither affects `text`, which is always derived from the full HTML.
 
+Where `text` is derived from HTML, images contribute their `alt` text and
+nothing else. `html-to-text` would otherwise print the image's source URL,
+which in bulk mail means filenames and tracking pixels; skipping images
+outright was worse, since it dropped alt text that carries real content (in one
+mailbox, 20 of 21 messages with a substantive alt text lost it) and removed the
+separation between whatever sat on either side, so a footer's two addresses
+merged into `marketing@example.nlnieuwsbrief@example.com`. An `alt` that is
+just the image's own filename is treated as absent.
+
 ## Attachments
 
 Appointment confirmations and invoices routinely carry their real content in

@@ -54,12 +54,38 @@ export function stripDataUris(html, { minChars = MIN_STRIPPED_DATA_URI_CHARS } =
   });
 }
 
+// Senders routinely set alt to the image's own filename, which is the thing
+// this formatter exists to keep out of the text.
+const FILENAME_ALT = /^[\w .@%+-]*\.(?:png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i;
+
+// How to render an <img> as text.
+//
+// html-to-text's own image formatter prints the source URL whenever an image
+// has no usable alt text, which fills marketing mail with filenames and
+// tracking pixels. Skipping images outright loses the alt text that does carry
+// content -- measured over one mailbox, 20 of 21 messages with a substantive
+// alt text lost it that way -- and removes whatever separated the text on
+// either side, gluing neighbouring words into one: two addresses in a footer
+// came out as "marketing@example.nlnieuwsbrief@example.com".
+//
+// So: emit the alt text when it says something, and nothing when it does not.
+// Either way the text is padded with spaces, because html-to-text drops an
+// inline run that is only whitespace -- without the padding the words on
+// either side of the image still run together. The spaces collapse when
+// adjacent and disappear in the final trim.
+function imageAltOnly(elem, _walk, builder) {
+  const raw = typeof elem?.attribs?.alt === "string" ? elem.attribs.alt.trim() : "";
+  const alt = raw.length > 0 && !FILENAME_ALT.test(raw) ? raw : "";
+  builder.addInline(` ${alt} `, { noWordTransform: true });
+}
+
 export function htmlToPlainText(html) {
   if (typeof html !== "string" || html.length === 0) return "";
   return convert(html, {
     wordwrap: false,
+    formatters: { imageAltOnly },
     selectors: [
-      { selector: "img", format: "skip" },
+      { selector: "img", format: "imageAltOnly" },
       { selector: "a", options: { hideLinkHrefIfSameAsText: true } }
     ]
   }).trim();

@@ -41,6 +41,28 @@ test("htmlToPlainText strips markup and keeps link targets", () => {
   assert.doesNotMatch(text, /<[a-z]/i);
 });
 
+test("htmlToPlainText keeps an image's alt text", () => {
+  const text = htmlToPlainText('<p>voor<img src="x.png" alt="Welkom bij UnitedConsumers">na</p>');
+  assert.match(text, /Welkom bij UnitedConsumers/);
+  // The alt text must not be glued to the words on either side of it.
+  assert.match(text, /voor Welkom bij UnitedConsumers na/);
+});
+
+test("htmlToPlainText drops an alt that is only the image's filename", () => {
+  for (const alt of ["8a700107-b3c3.png", "Sigma-handtekening-V1.jpg", "logo.SVG"]) {
+    const text = htmlToPlainText(`<p>een<img src="x" alt="${alt}">twee</p>`);
+    assert.doesNotMatch(text, /\.(png|jpg|svg)/i, `alt "${alt}" lekte in de tekst`);
+    assert.match(text, /een twee/);
+  }
+});
+
+test("htmlToPlainText keeps neighbours apart across an image without alt", () => {
+  // A footer with two addresses either side of a spacer image: skipping the
+  // image outright used to merge them into one unusable word.
+  const text = htmlToPlainText('<div>marketing@dynamis.nl<img src="s.gif">nieuwsbrief@bmvmakelaars.nl</div>');
+  assert.match(text, /marketing@dynamis\.nl nieuwsbrief@bmvmakelaars\.nl/);
+});
+
 test("htmlToPlainText yields nothing for markup without text", () => {
   assert.equal(htmlToPlainText('<html><body><img src="x.png"></body></html>'), "");
   assert.equal(htmlToPlainText(""), "");
