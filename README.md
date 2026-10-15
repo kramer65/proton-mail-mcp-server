@@ -342,12 +342,15 @@ one account, 98.5% had an HTML part and no plain-text part, 1.3% were
 plain-text only, and a single message carried both. Deciding the source from
 `mailparser`'s output alone would have labelled most of that mailbox `"plain"`.
 
-One consequence: text reported as `"html"` has been through one of two
-converters. For a `text/html` root it is `mailparser`'s own conversion; for
-HTML inside a multipart wrapper it is this server's, which skips images and
-hides link targets that merely repeat the link text. The wording therefore
-differs slightly between the two, which matters only if you are diffing output
-across messages.
+All text derived from HTML goes through the same conversion, including the
+case where `mailparser` already produced some of its own. Its conversion keeps
+the source URL of every image and hard-wraps at about 80 columns; this one
+keeps `alt` text, drops tracking pixels and filenames, and leaves lines
+intact. Converting everything the same way also means a message reads the same
+whether or not the sender happened to attach a logo. Measured over 83
+HTML-rooted messages in one mailbox, 80 came out different from `mailparser`'s
+version and in none of them was anything lost but image filenames and URL path
+fragments.
 
 If nothing readable can be found, `text` holds an explicit notice and
 `bodySource` is `"none"`, so a genuinely empty message is distinguishable from

@@ -101,6 +101,28 @@ test("a text/html root is never reported as a text/plain part", async () => {
   assert.equal(selectBody(parsed).bodySource, "html");
 });
 
+test("a text/html root is converted by this server, not by mailparser", async () => {
+  // mailparser renders an <img> as its source URL and wraps long lines; this
+  // server keeps the alt text and drops the URL. Routing every HTML-derived
+  // body through one converter is what keeps the two cases consistent.
+  const raw = [
+    "Subject: Alleen HTML met afbeelding",
+    "MIME-Version: 1.0",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    '<html><body><p>voor<img src="https://tracker.example/pixel.png" alt="Welkom bij Example">na</p></body></html>',
+    ""
+  ].join("\r\n");
+  const parsed = await parse(raw);
+  // Premise: mailparser does produce text here, and it carries the URL.
+  assert.match(parsed.text, /tracker\.example/);
+
+  const body = selectBody(parsed);
+  assert.equal(body.bodySource, "html");
+  assert.doesNotMatch(body.text, /tracker\.example/);
+  assert.match(body.text, /voor Welkom bij Example na/);
+});
+
 test("a real text/plain part is still reported as plain", async () => {
   for (const fixture of [fixtures.PLAIN_ONLY, fixtures.MULTIPART_ALTERNATIVE]) {
     assert.equal((await bodyOf(fixture)).bodySource, "plain");

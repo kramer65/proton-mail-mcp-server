@@ -117,23 +117,37 @@ function hasPlainTextPart(parsed) {
 // "none", naming the part the text came from, so a caller can tell a genuinely
 // empty message from a parse failure. The reported HTML is always the full
 // document, with only oversized base64 payloads replaced by a marker.
+//
+// Every text derived from HTML goes through htmlToPlainText, including the one
+// mailparser already produced for a text/html root. mailparser's own
+// conversion keeps the source URL of every image and hard-wraps at about 80
+// columns; this one keeps alt text, drops tracking pixels and filenames, and
+// leaves the lines intact. Using it everywhere also means one message's body
+// reads the same whether or not the sender happened to attach a logo.
 export function selectBody(parsed, options = {}) {
   const plain = typeof parsed?.text === "string" ? parsed.text : "";
   const rawHtml = typeof parsed?.html === "string" && parsed.html.length > 0 ? parsed.html : null;
   const html = rawHtml === null ? null : stripDataUris(rawHtml, options);
 
-  if (!isBlank(plain)) {
-    // Text mailparser derived from a text/html root is reported as coming from
-    // the HTML, which is where it came from. The text itself is left as
-    // mailparser produced it, so what callers receive does not change.
-    return { text: plain, html, bodySource: hasPlainTextPart(parsed) ? "plain" : "html" };
+  // A genuine text/plain part is what the sender wrote, so it wins outright.
+  if (hasPlainTextPart(parsed) && !isBlank(plain)) {
+    return { text: plain, html, bodySource: "plain" };
   }
   if (rawHtml !== null) {
     const converted = htmlToPlainText(rawHtml);
     if (!isBlank(converted)) {
       return { text: converted, html, bodySource: "html" };
     }
+    // Our conversion found nothing readable. If mailparser still got something
+    // out of the same HTML, report that rather than claiming an empty body.
+    if (!isBlank(plain)) {
+      return { text: plain, html, bodySource: "html" };
+    }
     return { text: UNREADABLE_HTML_NOTICE, html, bodySource: "none" };
+  }
+  // No HTML to fall back on; anything left is whatever the plain part held.
+  if (!isBlank(plain)) {
+    return { text: plain, html: null, bodySource: "plain" };
   }
   return { text: NO_BODY_NOTICE, html: null, bodySource: "none" };
 }
