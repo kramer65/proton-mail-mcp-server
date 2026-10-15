@@ -65,7 +65,31 @@ test("html-only mail yields readable text", async () => {
   const body = await bodyOf(fixtures.HTML_ONLY);
   assert.match(body.text, /Hallo wereld/);
   assert.match(body.html, /<b>wereld<\/b>/);
-  assert.notEqual(body.bodySource, "none");
+  // mailparser hands back a non-blank `text` here, derived from the HTML
+  // itself, but the message has no text/plain part -- so the reported source
+  // must be the HTML, not a part that was never there.
+  assert.equal(body.bodySource, "html");
+});
+
+test("a text/html root is never reported as a text/plain part", async () => {
+  const parsed = await parse(fixtures.HTML_ONLY);
+  // Guard the premise: if mailparser ever stops deriving text here, this test
+  // would pass for the wrong reason.
+  assert.ok(typeof parsed.text === "string" && parsed.text.trim().length > 0);
+  assert.equal(selectBody(parsed).bodySource, "html");
+});
+
+test("a real text/plain part is still reported as plain", async () => {
+  for (const fixture of [fixtures.PLAIN_ONLY, fixtures.MULTIPART_ALTERNATIVE]) {
+    assert.equal((await bodyOf(fixture)).bodySource, "plain");
+  }
+});
+
+test("a message that is only an attachment reports an empty body", async () => {
+  const body = await bodyOf(fixtures.ATTACHMENT_ONLY_EMPTY_BODY);
+  assert.equal(body.bodySource, "none");
+  assert.equal(body.text, NO_BODY_NOTICE);
+  assert.equal(body.html, null);
 });
 
 test("html inside multipart/related falls back to the html part", async () => {

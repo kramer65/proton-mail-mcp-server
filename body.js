@@ -65,6 +65,21 @@ export function htmlToPlainText(html) {
   }).trim();
 }
 
+// True when the message actually carries a text/plain body part.
+//
+// `parsed.text` alone cannot answer this: mailparser fills it from the HTML
+// itself when the HTML part is the whole message, so a non-blank `text` does
+// not prove a text/plain part was ever there. The root Content-Type does. A
+// text/html root is the entire message and has no siblings, so any text that
+// came out of it was derived from that HTML. Every other root -- text/plain,
+// any multipart, or no Content-Type at all (which defaults to text/plain) --
+// only yields `text` when a real text/plain part supplied it.
+function hasPlainTextPart(parsed) {
+  const header = parsed?.headers?.get?.("content-type");
+  const rootType = typeof header?.value === "string" ? header.value.toLowerCase().trim() : "";
+  return rootType !== "text/html";
+}
+
 // Pick the body to report for a message parsed by mailparser's simpleParser.
 //
 // mailparser derives `text` from the HTML itself, but only when the HTML part
@@ -73,16 +88,19 @@ export function htmlToPlainText(html) {
 // images or attachments -- it leaves `text` undefined and fills only `html`.
 //
 // Returns { text, html, bodySource } where bodySource is "plain", "html" or
-// "none", so a caller can tell a genuinely empty message from a parse failure.
-// The reported HTML is always the full document, with only oversized base64
-// payloads replaced by a marker.
+// "none", naming the part the text came from, so a caller can tell a genuinely
+// empty message from a parse failure. The reported HTML is always the full
+// document, with only oversized base64 payloads replaced by a marker.
 export function selectBody(parsed, options = {}) {
   const plain = typeof parsed?.text === "string" ? parsed.text : "";
   const rawHtml = typeof parsed?.html === "string" && parsed.html.length > 0 ? parsed.html : null;
   const html = rawHtml === null ? null : stripDataUris(rawHtml, options);
 
   if (!isBlank(plain)) {
-    return { text: plain, html, bodySource: "plain" };
+    // Text mailparser derived from a text/html root is reported as coming from
+    // the HTML, which is where it came from. The text itself is left as
+    // mailparser produced it, so what callers receive does not change.
+    return { text: plain, html, bodySource: hasPlainTextPart(parsed) ? "plain" : "html" };
   }
   if (rawHtml !== null) {
     const converted = htmlToPlainText(rawHtml);

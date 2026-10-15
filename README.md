@@ -332,6 +332,23 @@ This matters for any message whose HTML sits inside a `multipart/related` or
 attachments. `mailparser` performs no HTML-to-text conversion of its own in
 that case, which is why such messages previously came back with an empty body.
 
+`bodySource` names the part the text came from, not the converter that
+produced it. A message whose root is `text/html` has no `text/plain` part at
+all, so it reports `"html"` even though `mailparser` filled in `text` by
+converting the HTML itself; only a message that genuinely carries a
+`text/plain` part reports `"plain"`. The distinction is worth having because a
+Proton mailbox is almost entirely HTML: measured over 400 recent messages in
+one account, 98.5% had an HTML part and no plain-text part, 1.3% were
+plain-text only, and a single message carried both. Deciding the source from
+`mailparser`'s output alone would have labelled most of that mailbox `"plain"`.
+
+One consequence: text reported as `"html"` has been through one of two
+converters. For a `text/html` root it is `mailparser`'s own conversion; for
+HTML inside a multipart wrapper it is this server's, which skips images and
+hides link targets that merely repeat the link text. The wording therefore
+differs slightly between the two, which matters only if you are diffing output
+across messages.
+
 If nothing readable can be found, `text` holds an explicit notice and
 `bodySource` is `"none"`, so a genuinely empty message is distinguishable from
 a parsing failure.

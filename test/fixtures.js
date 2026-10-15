@@ -193,6 +193,31 @@ export const HTML_WITH_EMBEDDED_DATA_URI = join([
 ]);
 
 // No body parts whatsoever.
+// A message carrying nothing but an attachment: the text/plain part exists but
+// holds only a newline. Taken from real sent mail -- scans and forms sent
+// without a covering note. There is no HTML to fall back to, so this must be
+// reported as empty rather than silently blank.
+export const ATTACHMENT_ONLY_EMPTY_BODY = join([
+  "From: Afzender <afzender@example.org>",
+  "Subject: Scan rijbewijs",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/mixed; boundary="MIX"',
+  "",
+  "--MIX",
+  "Content-Type: text/plain; charset=utf-8",
+  "",
+  "",
+  "--MIX",
+  "Content-Type: application/pdf",
+  "Content-Transfer-Encoding: base64",
+  'Content-Disposition: attachment; filename="scan.pdf"',
+  "",
+  "JVBERi0xLjQK",
+  "",
+  "--MIX--",
+  ""
+]);
+
 export const NO_BODY_AT_ALL = join([
   "From: Afzender <afzender@example.org>",
   "Subject: Leeg",
